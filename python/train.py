@@ -144,9 +144,9 @@ def train(dtrain: lgb.Dataset, dval: lgb.Dataset) -> lgb.Booster:
 def evaluate(booster: lgb.Booster, val_df: pd.DataFrame) -> None:
     """Log key metrics on the validation set."""
     X_val = val_df[ALL_FEATURES]
-    # Predict log(lambda), then add log(exposure) offset
-    log_mu = booster.predict(X_val) + np.log(val_df[EXPOSURE])
-    mu = np.exp(log_mu)
+    # booster.predict() for Poisson returns λ (annual frequency) directly.
+    # Expected count in the observation period = λ × exposure.
+    mu = booster.predict(X_val) * val_df[EXPOSURE].values
 
     y = val_df[TARGET].values
     exposure = val_df[EXPOSURE].values

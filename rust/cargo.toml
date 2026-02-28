@@ -1,0 +1,20 @@
+[package]
+name = "claim-simulation"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# ONNX Runtime bindings. "load-dynamic" loads the shared library at runtime;
+# we point ORT_DYLIB_PATH at the one already installed in the Python venv.
+ort        = { version = "=2.0.0-rc.11", features = ["load-dynamic"] }
+
+# Random number generation.
+# "small_rng" feature is required to use SmallRng (a fast, non-cryptographic RNG).
+rand       = { version = "0.8", features = ["small_rng"] }
+rand_distr = "0.4"        # Poisson distribution
+
+# Data-parallel iteration — swap .iter() for .into_par_iter() to use all cores
+rayon      = "1"
+
+# Ergonomic error handling — like Python exceptions but at the type level
+anyhow     = "1"

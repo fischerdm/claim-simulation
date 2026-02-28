@@ -87,15 +87,17 @@ def run_validation(
     exposure = df_sample["Exposure"].values
     y = df_sample["ClaimNb"].values
 
-    # LightGBM predictions
-    lgb_log_lambda = booster.predict(X)
-    lgb_lambda = np.exp(lgb_log_lambda + np.log(exposure))
+    # LightGBM predictions.
+    # booster.predict() for Poisson returns λ (annual frequency) directly.
+    # Expected count in the observation period = λ × exposure.
+    lgb_lambda = booster.predict(X)          # λ per policy per year
+    lgb_mu = lgb_lambda * exposure           # expected claims in period
 
-    # ONNX predictions
+    # ONNX predictions (onnxmltools preserves the exp() — same scale as Python predict).
     input_name = sess.get_inputs()[0].name
     output_name = sess.get_outputs()[0].name
-    onnx_log_lambda = sess.run([output_name], {input_name: X})[0].flatten()
-    onnx_lambda = np.exp(onnx_log_lambda + np.log(exposure))
+    onnx_lambda = sess.run([output_name], {input_name: X})[0].flatten()  # λ per policy
+    onnx_mu = onnx_lambda * exposure         # expected claims in period
 
     # Agreement between LightGBM and ONNX
     diff = np.abs(lgb_lambda - onnx_lambda)
@@ -103,10 +105,10 @@ def run_validation(
     logger.info("LGB vs ONNX — mean abs diff in λ: %.6f", diff.mean())
     logger.info("LGB vs ONNX — correlation:         %.8f", np.corrcoef(lgb_lambda, onnx_lambda)[0, 1])
 
-    # Predictive quality (LightGBM)
+    # Predictive quality: sum(μ_i) / sum(exposure_i) = exposure-weighted mean frequency
     actual_freq = y.sum() / exposure.sum()
-    pred_freq_lgb = lgb_lambda.sum() / exposure.sum()
-    pred_freq_onnx = onnx_lambda.sum() / exposure.sum()
+    pred_freq_lgb = lgb_mu.sum() / exposure.sum()
+    pred_freq_onnx = onnx_mu.sum() / exposure.sum()
     logger.info("Actual frequency:      %.4f", actual_freq)
     logger.info("LGB predicted freq:    %.4f", pred_freq_lgb)
     logger.info("ONNX predicted freq:   %.4f", pred_freq_onnx)

@@ -6,8 +6,9 @@ for fast inference in the Rust simulation engine via the `ort` crate.
 
 Important notes on the ONNX graph:
 - Input:  float32 tensor of shape [N, n_features] — ALL_FEATURES in order
-- Output: float32 tensor of shape [N] — raw log(lambda) WITHOUT exposure offset
-          The Rust code must add log(exposure) before exp() to get the claim rate.
+- Output: float32 tensor of shape [N, 1] — annual claim frequency λ (already exponentiated).
+          onnxmltools preserves LightGBM's exp() transform, so the output is λ not log(λ).
+          The Rust code multiplies by exposure to get the expected claim count: μ = λ × exposure.
 - Categoricals are label-encoded integers passed as float32 (LightGBM ONNX convention).
 
 Usage:
@@ -106,12 +107,8 @@ def validate_onnx(booster: lgb.Booster, n_features: int) -> None:
         )
 
     # Log a few sample predictions for manual inspection
-    logger.info("Sample LightGBM preds (log λ): %s", np.round(lgb_preds[:5], 4))
-    logger.info("Sample ONNX preds     (log λ): %s", np.round(onnx_preds[:5], 4))
-    logger.info(
-        "Exponentiated (λ before exposure): %s",
-        np.round(np.exp(onnx_preds[:5]), 4),
-    )
+    logger.info("Sample LightGBM preds (λ): %s", np.round(lgb_preds[:5], 4))
+    logger.info("Sample ONNX preds     (λ): %s", np.round(onnx_preds[:5], 4))
 
 
 def main() -> None:
@@ -121,7 +118,7 @@ def main() -> None:
     validate_onnx(booster, n_features)
     logger.info(
         "\nONNX model ready at %s\n"
-        "Rust usage: input float32[N, %d], output is log(λ) — add log(exposure) before exp().",
+        "Rust usage: input float32[N, %d], output is λ (annual frequency) — multiply by exposure to get μ.",
         ONNX_PATH,
         n_features,
     )
