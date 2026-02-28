@@ -23,7 +23,14 @@ claim-simulation/
 │   ├── export_onnx.py          # converts the model to ONNX format
 │   └── validate.py             # validates LightGBM vs ONNX agreement
 └── rust/
-    └── src/                    # simulation engine (in development)
+    ├── .cargo/
+    │   └── config.toml         # sets ORT_DYLIB_PATH so cargo run works without extra setup
+    ├── src/
+    │   ├── main.rs             # entry point
+    │   ├── model.rs            # loads and runs the ONNX model
+    │   ├── portfolio.rs        # Policy struct and test portfolio
+    │   └── simulator.rs        # Poisson draws and statistics
+    └── Cargo.toml
 ```
 
 ## Dataset
@@ -105,10 +112,11 @@ python python/export_onnx.py
 
 Converts the LightGBM model to ONNX format using `onnxmltools`. The ONNX model:
 - **Input:** float32 tensor `[N, 9]` — all features in order (categoricals as label-encoded integers cast to float32)
-- **Output:** float32 tensor `[N]` — raw `log(λ)` **without** the exposure offset
+- **Output:** float32 tensor `[N, 1]` — annual claim frequency λ per policy (already in original scale, not log scale)
 
-The Rust simulation engine must therefore compute `λ = exp(log_lambda + log(exposure))` before
-drawing from the Poisson distribution.
+To get the expected number of claims for a policy in the simulation period:
+`μ = λ × exposure` (e.g., a policy with λ = 0.10 and exposure = 0.75 years expects 0.075 claims).
+The Rust code then draws from Poisson(μ) for each policy.
 
 Saves `models/frequency_model.onnx` and runs a quick sanity check against the Python predictions.
 
@@ -130,5 +138,42 @@ End-to-end validation on real data:
 
 ## Rust simulation engine
 
-*(in development)* — loads `frequency_model.onnx` via the `ort` crate, runs Monte Carlo
-claim simulations over a policy portfolio in parallel using Rayon.
+The Rust engine loads `frequency_model.onnx` and runs 10,000 independent Monte Carlo
+simulations over a hardcoded test portfolio of 8 policies.
+
+### How it works
+
+1. **Load model** — the ONNX model is loaded once from disk.
+2. **Compute λ per policy** — the model is run once (it is deterministic: same policy always
+   gives the same λ). Each λ is multiplied by the policy's exposure to get μ (expected claims).
+3. **Simulate** — 10,000 simulations run in parallel across all CPU cores. Each simulation
+   draws a random claim count from Poisson(μ) for every policy and sums them.
+4. **Report** — prints mean, standard deviation, and percentiles (P50, P75, P95, P99, P99.5)
+   of the simulated claim frequency distribution.
+
+### Setup
+
+You need Rust installed (`rustup`). The engine links against the ONNX Runtime library that
+ships with the Python `onnxruntime` package — so you must have the Python venv set up first
+(see [Python environment](#python-environment) above).
+
+The file `rust/.cargo/config.toml` tells Cargo where to find the ONNX Runtime library.
+It contains a path like:
+
+```
+../.venv/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.1.23.2.dylib
+```
+
+**If you clone this repo on a different machine**, check two version numbers in that file
+and adjust them to match your setup:
+- `python3.12` → your Python minor version (`python3 --version`)
+- `1.23.2` → your onnxruntime version (`pip show onnxruntime`)
+
+### Run
+
+```bash
+cd rust
+cargo run
+```
+
+No extra environment variables needed — the config file handles it.

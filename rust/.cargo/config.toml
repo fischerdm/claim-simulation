@@ -1,0 +1,14 @@
+# Project-level Cargo configuration.
+#
+# Sets ORT_DYLIB_PATH so that both `cargo build/run` and rust-analyzer
+# can locate the ONNX Runtime shared library without any manual env var.
+#
+# The dylib ships inside the Python onnxruntime package — reuse what is
+# already installed in the project's venv rather than a separate install.
+#
+# ⚠ Two version numbers in this path may need adjusting on other machines:
+#   - python3.12  → match your Python minor version (python3.11, python3.13, …)
+#   - 1.23.2      → match the installed onnxruntime version (pip show onnxruntime)
+
+[env]
+ORT_DYLIB_PATH = { value = "../.venv/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.1.23.2.dylib", relative = true }
