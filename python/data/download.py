@@ -39,7 +39,7 @@ def download() -> pd.DataFrame:
         download_qualities=False,
         download_features_meta_data=False,
     )
-    X, y, _, attribute_names = dataset.get_data(dataset_format="dataframe")
+    X, y, _, attribute_names = dataset.get_data(dataset_format="dataframe", target="ClaimNb")
 
     # OpenML returns X without the target; y is ClaimNb
     df = X.copy()
