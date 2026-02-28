@@ -63,7 +63,7 @@ def export_onnx(booster: lgb.Booster, n_features: int) -> None:
     onnx_model = convert_lightgbm(
         booster,
         initial_types=initial_types,
-        target_opset=17,
+        target_opset=15,
     )
 
     with open(ONNX_PATH, "wb") as f:
