@@ -1,25 +1,21 @@
 """
 benchmark.py
 ------------
-Python Monte Carlo claim simulation — used to benchmark against the Rust engine.
+Runs the Monte Carlo claim simulation in both Python and Rust, then prints a
+side-by-side timing comparison.
 
-Runs N_SIMS simulations using ONNX inference (same model as Rust) and NumPy
-vectorised Poisson draws. Each simulation is a sequential Python loop iteration;
-there is no Rayon-style automatic parallelism (adding multiprocessing would require
-significant boilerplate and pickle overhead, which itself is an argument for Rust).
-
-Output format mirrors the Rust engine so you can compare results side-by-side.
+Python simulation: ONNX inference + sequential NumPy Poisson loop (no parallelism).
+Rust simulation:   same ONNX inference + parallel Rayon Poisson loop (all CPU cores).
 
 Usage:
     python python/benchmark.py
-
-Then compare with the Rust engine:
-    cd rust && cargo run --release
 """
 
 from __future__ import annotations
 
 import logging
+import re
+import subprocess
 import time
 from pathlib import Path
 
@@ -32,6 +28,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 PORTFOLIO_PATH = Path(__file__).parent.parent / "data" / "portfolio.csv"
 ONNX_PATH = Path(__file__).parent.parent / "models" / "frequency_model.onnx"
+RUST_DIR = Path(__file__).parent.parent / "rust"
 
 FEATURE_COLS = [
     "veh_power", "veh_age", "driv_age", "bonus_malus", "density",
@@ -40,6 +37,10 @@ FEATURE_COLS = [
 
 N_SIMS = 10_000
 
+
+# ---------------------------------------------------------------------------
+# Python simulation
+# ---------------------------------------------------------------------------
 
 def load_portfolio() -> tuple[np.ndarray, np.ndarray]:
     """Returns (features float32 [N, 9], exposure float64 [N])."""
@@ -50,42 +51,32 @@ def load_portfolio() -> tuple[np.ndarray, np.ndarray]:
 
 
 def compute_lambdas(features: np.ndarray, exposure: np.ndarray) -> np.ndarray:
-    """Run ONNX inference, return μ per policy (λ × exposure)."""
+    """Run ONNX inference; return μ per policy (λ × exposure)."""
     sess = rt.InferenceSession(str(ONNX_PATH), providers=["CPUExecutionProvider"])
     input_name = sess.get_inputs()[0].name
     output_name = sess.get_outputs()[0].name
     lambdas = sess.run([output_name], {input_name: features})[0].flatten().astype(np.float64)
-    return lambdas * exposure  # μ = λ × exposure
+    return lambdas * exposure
 
 
 def simulate(mus: np.ndarray, total_exposure: float, n_sims: int, seed: int = 42) -> np.ndarray:
     """
-    Run n_sims independent Poisson simulations.
-
-    Each iteration draws Poisson(μ_i) for all N policies at once (vectorised),
-    then sums across policies for the portfolio-level claim count. The loop
-    over simulations is sequential — the Python GIL prevents true thread-level
-    parallelism (in contrast to Rust's Rayon which parallelises across all cores
-    with zero overhead).
-
-    With 678 K policies, each numpy Poisson draw takes ~10 ms, so
-    10 000 simulations ≈ 100 s single-threaded Python.
+    Sequential Poisson simulation — one Python loop iteration per simulation.
+    Each iteration is vectorised (NumPy draws all N policy counts at once),
+    but the GIL prevents running simulations in parallel across threads.
     """
     rng = np.random.default_rng(seed)
     claims = np.empty(n_sims, dtype=np.float64)
     for i in range(n_sims):
         claims[i] = rng.poisson(mus).sum()
-    return claims / total_exposure  # → frequencies
+    return claims / total_exposure
 
 
-def print_stats(frequencies: np.ndarray, total_exposure: float, n_sims: int) -> None:
+def print_stats(label: str, frequencies: np.ndarray, total_exposure: float, n_sims: int) -> None:
     mean_claims = frequencies.mean() * total_exposure
-    print()
-    print(f"=== Claim Simulation Results ({n_sims} simulations) ===")
+    print(f"=== {label} — Simulation Results ({n_sims} simulations) ===")
     print(f"Portfolio exposure: {total_exposure:.2f} policy-years")
-    print()
     print(f"Expected claims per simulation:  {mean_claims:.2f}")
-    print()
     print("Claim frequency (claims / policy-year):")
     print(f"  Mean:   {frequencies.mean():.5f}")
     print(f"  Std:    {frequencies.std():.5f}")
@@ -97,6 +88,47 @@ def print_stats(frequencies: np.ndarray, total_exposure: float, n_sims: int) -> 
     print()
 
 
+# ---------------------------------------------------------------------------
+# Rust simulation (via subprocess)
+# ---------------------------------------------------------------------------
+
+def run_rust() -> float | None:
+    """
+    Run the Rust engine via `cargo run --release`.
+
+    Cargo's build output goes to stderr (visible in the terminal so the user
+    sees progress). The Rust engine's stdout is captured for timing extraction.
+
+    Returns the simulation time in seconds, or None if the run fails.
+    """
+    logger.info("Running Rust engine (cargo run --release) ...")
+    result = subprocess.run(
+        ["cargo", "run", "--release"],
+        cwd=RUST_DIR,
+        stdout=subprocess.PIPE,  # capture for parsing
+        text=True,               # stderr flows through → user sees cargo output
+    )
+
+    if result.returncode != 0:
+        logger.warning("Rust engine exited with code %d", result.returncode)
+        return None
+
+    print(result.stdout)
+
+    # Parse "Done in X.XXs  (Y.Y µs/simulation)"
+    match = re.search(r"\(([\d.]+) µs/simulation\)", result.stdout)
+    if not match:
+        logger.warning("Could not parse Rust timing from output.")
+        return None
+
+    us_per_sim = float(match.group(1))
+    return us_per_sim * N_SIMS / 1e6
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 def main() -> None:
     if not PORTFOLIO_PATH.exists():
         raise FileNotFoundError(
@@ -104,31 +136,40 @@ def main() -> None:
             "Run python/export_portfolio.py first."
         )
 
-    logger.info("Loading portfolio from %s ...", PORTFOLIO_PATH)
+    # --- Python ---
+    logger.info("Loading portfolio (%s) ...", PORTFOLIO_PATH)
     features, exposure = load_portfolio()
-    n_policies = len(features)
     total_exposure = float(exposure.sum())
-    logger.info("Portfolio: %d policies, %.2f total policy-years", n_policies, total_exposure)
+    logger.info("Portfolio: %d policies, %.2f total policy-years", len(features), total_exposure)
 
     logger.info("Running ONNX inference ...")
     mus = compute_lambdas(features, exposure)
-    logger.info("Mean μ per policy: %.5f", mus.mean())
 
-    logger.info("Running %d simulations (single-threaded Python) ...", N_SIMS)
+    logger.info("Running %d simulations (Python, single-threaded) ...", N_SIMS)
     t0 = time.perf_counter()
     frequencies = simulate(mus, total_exposure, N_SIMS)
-    elapsed = time.perf_counter() - t0
+    python_elapsed = time.perf_counter() - t0
+    logger.info("Python done in %.2fs  (%.1f µs/simulation)", python_elapsed, python_elapsed / N_SIMS * 1e6)
 
-    logger.info(
-        "Done in %.2fs  (%.1f µs/simulation)",
-        elapsed,
-        elapsed / N_SIMS * 1e6,
-    )
+    print()
+    print_stats("Python", frequencies, total_exposure, N_SIMS)
 
-    print_stats(frequencies, total_exposure, N_SIMS)
+    # --- Rust ---
+    rust_elapsed = run_rust()
 
-    print("To compare: cd rust && cargo run --release")
-    print("(--release enables compiler optimisations; always use it for benchmarking)")
+    # --- Comparison ---
+    print("=" * 52)
+    print("  Benchmark summary")
+    print("=" * 52)
+    print(f"  {'Engine':<12}  {'Time':>10}  {'µs/sim':>10}")
+    print(f"  {'-'*12}  {'-'*10}  {'-'*10}")
+    print(f"  {'Python':<12}  {python_elapsed:>9.2f}s  {python_elapsed / N_SIMS * 1e6:>9.1f}")
+    if rust_elapsed is not None:
+        speedup = python_elapsed / rust_elapsed
+        print(f"  {'Rust':<12}  {rust_elapsed:>9.2f}s  {rust_elapsed / N_SIMS * 1e6:>9.1f}")
+        print(f"  {'-'*12}  {'-'*10}  {'-'*10}")
+        print(f"  Speedup: {speedup:.1f}×")
+    print("=" * 52)
 
 
 if __name__ == "__main__":
