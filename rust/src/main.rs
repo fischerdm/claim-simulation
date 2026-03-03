@@ -1,48 +1,61 @@
 mod model;
 mod portfolio;
+mod portfolio_v2;
 mod simulator;
+mod simulator_v2;
 
 use std::path::Path;
 use std::time::Instant;
 
 use model::FrequencyModel;
 use portfolio::load_from_csv;
+use portfolio_v2::load_v2_from_csv;
 use simulator::{print_stats, run_parallel};
+use simulator_v2::{print_stats as print_stats_v2, run_parallel as run_parallel_v2};
 
+// --- v1: single-year simulation (original) ---
 const N_SIMS: usize = 10_000;
 
 // Paths are relative to the rust/ directory where `cargo run` is executed.
 const MODEL_PATH:     &str = "../models/frequency_model.onnx";
 const PORTFOLIO_PATH: &str = "../data/portfolio.csv";
 
+// --- v2: multi-year simulation with claim history feedback ---
+const N_SIMS_V2:         usize = 10_000;
+const MODEL_PATH_V2:     &str  = "../models/frequency_model_v2.onnx";
+const PORTFOLIO_PATH_V2: &str  = "../data/portfolio_v2.csv";
+
 /// Entry point.
 ///
-/// In Rust, `main` can return `Result` — errors are printed and the process
-/// exits with a non-zero code. The `?` operator propagates errors upward,
-/// equivalent to re-raising an exception in Python.
+/// Runs two simulations back-to-back:
+///
+///   v1 — Single-year: λ computed ONCE, all simulations share the same rates.
+///         Parallelism over simulations; ONNX called exactly once.
+///
+///   v2 — Multi-year (5 years): λ recomputed each year per simulation because
+///         PriorClaims3Y (the rolling 3-year claim window) changes as claims
+///         are drawn. Each Rayon worker thread owns one ONNX session; there is
+///         no lock contention between threads.
 fn main() -> anyhow::Result<()> {
+    // ── v1: single-year ──────────────────────────────────────────────────────
+    println!("=== v1: single-year simulation ===");
     println!("Loading ONNX model from {} ...", MODEL_PATH);
     let mut model = FrequencyModel::load(Path::new(MODEL_PATH))?;
 
     println!("Loading portfolio from {} ...", PORTFOLIO_PATH);
-    let policies = load_from_csv(Path::new(PORTFOLIO_PATH))?;
-    let total_exposure: f64 = policies.iter().map(|p| p.exposure as f64).sum();
-
+    let policies       = load_from_csv(Path::new(PORTFOLIO_PATH))?;
+    let total_exposure = policies.iter().map(|p| p.exposure as f64).sum::<f64>();
     println!(
         "Portfolio: {} policies, {:.2} total policy-years",
         policies.len(),
         total_exposure
     );
 
-    // Run ONNX inference ONCE to get λ per policy.
-    // The model is deterministic: same policy → same λ every time.
-    // All 10,000 simulations share these lambdas and differ only in their
-    // Poisson random draws.
-    println!("Computing claim rates (λ per policy) ...");
+    println!("Computing λ per policy ...");
     let lambdas = model.compute_lambdas(&policies)?;
 
     println!("Running {} simulations in parallel ...", N_SIMS);
-    let t0 = Instant::now();
+    let t0      = Instant::now();
     let results = run_parallel(&lambdas, total_exposure, N_SIMS);
     let elapsed = t0.elapsed();
 
@@ -51,8 +64,25 @@ fn main() -> anyhow::Result<()> {
         elapsed,
         elapsed.as_micros() as f64 / N_SIMS as f64
     );
-
     print_stats(&results, total_exposure);
+
+    // ── v2: multi-year ───────────────────────────────────────────────────────
+    println!("=== v2: multi-year simulation ({} years) ===", simulator_v2::N_YEARS);
+    println!("Loading v2 portfolio from {} ...", PORTFOLIO_PATH_V2);
+    let policies_v2 = load_v2_from_csv(Path::new(PORTFOLIO_PATH_V2))?;
+    println!("Portfolio: {} policies", policies_v2.len());
+
+    println!("Running {} multi-year simulations in parallel ...", N_SIMS_V2);
+    let t0_v2  = Instant::now();
+    let res_v2 = run_parallel_v2(Path::new(MODEL_PATH_V2), &policies_v2, N_SIMS_V2);
+    let elapsed_v2 = t0_v2.elapsed();
+
+    println!(
+        "Done in {:.2?}  ({:.1} ms/simulation)",
+        elapsed_v2,
+        elapsed_v2.as_millis() as f64 / N_SIMS_V2 as f64
+    );
+    print_stats_v2(&res_v2, policies_v2.len());
 
     Ok(())
 }

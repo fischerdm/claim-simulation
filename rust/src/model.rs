@@ -91,4 +91,39 @@ impl FrequencyModel {
 
         Ok(lambdas)
     }
+
+    /// Generic inference: takes a pre-assembled row-major feature matrix and
+    /// returns λ (annual frequency) per policy.
+    ///
+    /// `flat_features` is a Vec<f32> of length `n_policies × n_features`.
+    /// This is the workhorse for the v2 multi-year simulation, where features
+    /// change each year (VehAge, DrivAge, PriorClaims3Y) and must be rebuilt
+    /// before every ONNX call.
+    pub fn run_inference(
+        &mut self,
+        flat_features: Vec<f32>,
+        n_policies: usize,
+        n_features: usize,
+    ) -> anyhow::Result<Vec<f64>> {
+        let tensor = Tensor::<f32>::from_array(([n_policies, n_features], flat_features))
+            .context("failed to create input tensor")?;
+
+        let mut outputs = self
+            .session
+            .run(inputs!["float_input" => tensor])
+            .context("ONNX inference failed")?;
+
+        let output = outputs
+            .remove(self.output_name.as_str())
+            .ok_or_else(|| anyhow::anyhow!("output '{}' not found", self.output_name))?;
+
+        let (_, lambda_slice) = output
+            .try_extract_tensor::<f32>()
+            .context("failed to extract output tensor as f32")?;
+
+        Ok(lambda_slice
+            .iter()
+            .map(|&l| (l as f64).max(1e-9))
+            .collect())
+    }
 }
