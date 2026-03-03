@@ -24,7 +24,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import LabelEncoder
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -61,12 +60,9 @@ def main() -> None:
 
     for col in CATEGORICAL_FEATURES:
         classes = metadata["categorical_encodings"][col]
-        le = LabelEncoder()
-        le.classes_ = np.array(classes)
-        # Map unseen labels to 0 (first class) as a safe fallback
-        df[col] = df[col].astype(str).map(
-            lambda x, le=le: (le.transform([x])[0] if x in le.classes_ else 0)
-        )
+        encoding = {label: i for i, label in enumerate(classes)}
+        # map(dict) is vectorised (C-level); fillna(0) handles any unseen labels
+        df[col] = df[col].astype(str).map(encoding).fillna(0).astype(int)
 
     # Build output with lowercase column names matching the Rust Policy struct
     out = pd.DataFrame(
