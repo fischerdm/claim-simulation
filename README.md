@@ -104,7 +104,7 @@ Trains a LightGBM Poisson regression model. Key design decisions:
 
 Saves `models/frequency_model.lgb` and `models/feature_metadata.json`.
 
-### 4. Export to ONNX
+### 4. Export to ONNX (and export portfolio)
 
 ```bash
 python python/export_onnx.py
@@ -124,7 +124,19 @@ Saves `models/frequency_model.onnx` and runs a quick sanity check against the Py
 > to opset 15; requesting a higher version raises a `RuntimeError`. Opset 15 is sufficient for
 > gradient boosted tree models — no relevant operators were added in later versions.
 
-### 5. Validate
+### 5. Export portfolio for Rust
+
+```bash
+python python/export_portfolio.py
+```
+
+Preprocesses `freMTPL2freq.csv` (same clipping and label-encoding as `train.py`) and saves
+`data/portfolio.csv` — a flat numeric CSV with the 9 model features plus exposure.
+This is the file the Rust engine reads at runtime.
+
+Column order: `veh_power, veh_age, driv_age, bonus_malus, density, area, veh_brand, veh_gas, region, exposure`
+
+### 6. Validate
 
 ```bash
 python python/validate.py
@@ -139,7 +151,7 @@ End-to-end validation on real data:
 ## Rust simulation engine
 
 The Rust engine loads `frequency_model.onnx` and runs 10,000 independent Monte Carlo
-simulations over a hardcoded test portfolio of 8 policies.
+simulations over the full 678,013-policy freMTPL2freq portfolio.
 
 ### How it works
 
@@ -173,7 +185,49 @@ and adjust them to match your setup:
 
 ```bash
 cd rust
-cargo run
+cargo run --release
 ```
 
+Use `--release` to enable compiler optimisations. Without it the binary is 10–30× slower.
 No extra environment variables needed — the config file handles it.
+
+### Unit tests
+
+```bash
+cd rust
+cargo test
+```
+
+The test portfolio (8 handcrafted policies) lives in `#[cfg(test)]` in `portfolio.rs` and
+is only compiled when running tests, not in the production binary.
+
+## Benchmark: Python vs Rust
+
+Run the Python simulation first to establish a baseline:
+
+```bash
+python python/benchmark.py
+```
+
+Then run the Rust engine:
+
+```bash
+cd rust && cargo run --release
+```
+
+### What the benchmark measures
+
+Both engines run the same workload: ONNX inference on 678 K policies followed by 10,000
+independent Monte Carlo simulations, each drawing a Poisson count for every policy.
+
+| Engine | Parallelism | Expected time (10 K sims, 678 K policies) |
+|--------|-------------|-------------------------------------------|
+| Python | Single-threaded (GIL prevents thread parallelism) | ~100 s |
+| Rust   | All CPU cores via Rayon | ~2–10 s |
+
+The speedup comes from two sources:
+1. **Parallelism** — Rayon distributes simulations across cores with zero boilerplate
+   (`into_par_iter()` is the only change needed). Python would require `multiprocessing`
+   with subprocess spawning and pickle overhead.
+2. **Compiled code** — Rust's Poisson sampling loop compiles to native SIMD instructions;
+   NumPy's inner loop has Python interpreter overhead per simulation.

@@ -18,3 +18,7 @@ rayon      = "1"
 
 # Ergonomic error handling — like Python exceptions but at the type level
 anyhow     = "1"
+
+# CSV parsing for loading the portfolio exported by python/export_portfolio.py
+csv        = "1"
+serde      = { version = "1", features = ["derive"] }
