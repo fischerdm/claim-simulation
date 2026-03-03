@@ -1,3 +1,8 @@
+use std::path::Path;
+
+use anyhow::Context;
+use serde::Deserialize;
+
 /// A single insurance policy with all features needed for frequency prediction.
 ///
 /// Feature order in `to_feature_row()` must match `ALL_FEATURES` in train.py:
@@ -25,7 +30,7 @@ pub struct Policy {
     pub region:    f32,    // French administrative region code
 
     // Exposure: fraction of the year the policy was active.
-    // NOT a model input — used as the offset: λ = exp(log_lambda + log(exposure))
+    // NOT a model input — used as the offset: μ = λ × exposure
     pub exposure: f32,
 }
 
@@ -47,8 +52,60 @@ impl Policy {
     }
 }
 
-/// A small representative test portfolio covering a range of risk profiles.
-/// In a real application this would be loaded from a CSV or database.
+/// CSV row written by python/export_portfolio.py.
+/// Column names match the CSV headers exactly — serde maps them by field name.
+/// All categoricals are already label-encoded (encoding applied in Python).
+#[derive(Deserialize)]
+struct PortfolioRow {
+    veh_power:   f32,
+    veh_age:     f32,
+    driv_age:    f32,
+    bonus_malus: f32,
+    density:     f32,
+    area:        f32,
+    veh_brand:   f32,
+    veh_gas:     f32,
+    region:      f32,
+    exposure:    f32,
+}
+
+/// Load a portfolio from the CSV file produced by python/export_portfolio.py.
+///
+/// The CSV contains numeric columns only — categoricals are already label-encoded
+/// with the same orderings as during model training. Column names must exactly
+/// match the `PortfolioRow` fields above.
+///
+/// Equivalent Python:
+///   df = pd.read_csv(path)
+pub fn load_from_csv(path: &Path) -> anyhow::Result<Vec<Policy>> {
+    let mut rdr = csv::Reader::from_path(path)
+        .with_context(|| format!("failed to open portfolio CSV at {}", path.display()))?;
+
+    let policies = rdr
+        .deserialize()
+        .enumerate()
+        .map(|(i, result)| {
+            let row: PortfolioRow = result
+                .with_context(|| format!("failed to parse row {} in portfolio CSV", i + 1))?;
+            Ok(Policy {
+                veh_power:   row.veh_power,
+                veh_age:     row.veh_age,
+                driv_age:    row.driv_age,
+                bonus_malus: row.bonus_malus,
+                density:     row.density,
+                area:        row.area,
+                veh_brand:   row.veh_brand,
+                veh_gas:     row.veh_gas,
+                region:      row.region,
+                exposure:    row.exposure,
+            })
+        })
+        .collect::<anyhow::Result<Vec<Policy>>>()?;
+
+    Ok(policies)
+}
+
+#[cfg(test)]
 pub fn test_portfolio() -> Vec<Policy> {
     vec![
         // 1. Low risk: experienced driver, best bonus-malus, rural area
@@ -124,4 +181,24 @@ pub fn test_portfolio() -> Vec<Policy> {
             exposure: 1.0,
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Smoke test: the test portfolio builds without panicking and has the expected size.
+    #[test]
+    fn test_portfolio_has_eight_policies() {
+        let portfolio = test_portfolio();
+        assert_eq!(portfolio.len(), 8);
+    }
+
+    /// Every policy must produce a 9-element feature row.
+    #[test]
+    fn feature_rows_have_correct_length() {
+        for policy in test_portfolio() {
+            assert_eq!(policy.to_feature_row().len(), 9);
+        }
+    }
 }

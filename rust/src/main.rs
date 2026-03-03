@@ -6,13 +6,14 @@ use std::path::Path;
 use std::time::Instant;
 
 use model::FrequencyModel;
-use portfolio::test_portfolio;
+use portfolio::load_from_csv;
 use simulator::{print_stats, run_parallel};
 
 const N_SIMS: usize = 10_000;
 
-// Path to the ONNX model, relative to the rust/ directory where `cargo run` is executed.
-const MODEL_PATH: &str = "../models/frequency_model.onnx";
+// Paths are relative to the rust/ directory where `cargo run` is executed.
+const MODEL_PATH:     &str = "../models/frequency_model.onnx";
+const PORTFOLIO_PATH: &str = "../data/portfolio.csv";
 
 /// Entry point.
 ///
@@ -23,7 +24,8 @@ fn main() -> anyhow::Result<()> {
     println!("Loading ONNX model from {} ...", MODEL_PATH);
     let mut model = FrequencyModel::load(Path::new(MODEL_PATH))?;
 
-    let policies = test_portfolio();
+    println!("Loading portfolio from {} ...", PORTFOLIO_PATH);
+    let policies = load_from_csv(Path::new(PORTFOLIO_PATH))?;
     let total_exposure: f64 = policies.iter().map(|p| p.exposure as f64).sum();
 
     println!(
@@ -38,10 +40,6 @@ fn main() -> anyhow::Result<()> {
     // Poisson random draws.
     println!("Computing claim rates (λ per policy) ...");
     let lambdas = model.compute_lambdas(&policies)?;
-    println!(
-        "  μ per policy (λ × exposure): {:?}",
-        lambdas.iter().map(|l| format!("{:.4}", l)).collect::<Vec<_>>()
-    );
 
     println!("Running {} simulations in parallel ...", N_SIMS);
     let t0 = Instant::now();
