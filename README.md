@@ -250,8 +250,8 @@ parallelises with Rayon. Both run the same workload.
 |---|---|---|---|
 | v1 single-year | Python | multiprocessing | ONNX once + 10K × 678K Poisson draws |
 | v1 single-year | Rust | Rayon | ONNX once + 10K × 678K Poisson draws |
-| v2 multi-year | Python | multiprocessing | 10K × 5 ONNX calls + 10K × 5 × 10K Poisson draws |
-| v2 multi-year | Rust | Rayon (per-thread sessions) | 10K × 5 ONNX calls + 10K × 5 × 10K Poisson draws |
+| v2 multi-year | Python | multiprocessing (1 ONNX session/worker) | 10K × 5 ONNX calls + 10K × 5 × 10K Poisson draws |
+| v2 multi-year | Rust | Rayon (1 ONNX session/thread) | 10K × 5 ONNX calls + 10K × 5 × 10K Poisson draws |
 
 The v1 speedup comes from two sources:
 1. **Parallelism** — Rayon distributes simulations across all cores with a one-line change.
