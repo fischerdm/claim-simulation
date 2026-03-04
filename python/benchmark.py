@@ -46,7 +46,7 @@ FEATURE_COLS = [
     "area", "veh_brand", "veh_gas", "region",
 ]
 
-N_SIMS    = 10_000
+N_SIMS    = 10 # 10_000
 N_WORKERS = os.cpu_count() or 4
 
 
@@ -137,17 +137,46 @@ def print_stats(label: str, frequencies: np.ndarray, total_exposure: float, n_si
 
 
 # ---------------------------------------------------------------------------
-# Rust simulation (via subprocess)
+# Rust simulation (via pre-built binary)
 # ---------------------------------------------------------------------------
+
+RUST_BINARY = RUST_DIR / "target" / "release" / "claim-simulation"
+
+
+def build_rust() -> bool:
+    """
+    Compile the Rust engine with `cargo build --release`.
+    Build output streams to the terminal so the user can see progress.
+    Returns True on success.
+    """
+    logger.info("Building Rust engine (cargo build --release) ...")
+    result = subprocess.run(
+        ["cargo", "build", "--release"],
+        cwd=RUST_DIR,
+    )
+    if result.returncode != 0:
+        logger.warning("Rust build failed (exit %d).", result.returncode)
+        return False
+    logger.info("Build complete.")
+    return True
+
 
 def run_rust() -> float | None:
     """
-    Run the Rust engine via `cargo run --release`.
-    Returns the v1 simulation time in seconds, or None if the run fails.
+    Run the pre-built Rust binary and return the v1 simulation time in seconds.
+
+    Separating build from run is essential for a fair benchmark: compilation
+    time is irrelevant to simulation throughput and can take 30-60 s after
+    source changes, completely swamping the actual simulation time.
     """
-    logger.info("Running Rust engine (cargo run --release) ...")
+    if not RUST_BINARY.exists():
+        logger.info("Binary not found — building first.")
+        if not build_rust():
+            return None
+
+    logger.info("Running Rust binary (%s) ...", RUST_BINARY)
     result = subprocess.run(
-        ["cargo", "run", "--release"],
+        [str(RUST_BINARY)],
         cwd=RUST_DIR,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -155,16 +184,14 @@ def run_rust() -> float | None:
     )
 
     if result.returncode != 0:
-        logger.warning("Rust engine failed (exit %d):\n%s", result.returncode, result.stderr)
+        logger.warning("Rust binary failed (exit %d):\n%s", result.returncode, result.stderr)
         return None
 
     print(result.stdout)
 
-    # Parse "Done in X.XXs  (Y.Y µs/simulation)" from the v1 section
-    match = re.search(r"v1.*?Done in.*?\(([\d.]+) µs/simulation\)", result.stdout, re.DOTALL)
-    if not match:
-        # Fall back to first match
-        match = re.search(r"\(([\d.]+) µs/simulation\)", result.stdout)
+    # Parse "Done in X.XXs  (Y.Y µs/simulation)" from the v1 section.
+    # The binary prints v1 first, so we take the first occurrence.
+    match = re.search(r"\(([\d.]+) µs/simulation\)", result.stdout)
     if not match:
         logger.warning("Could not parse Rust v1 timing from output.")
         return None
