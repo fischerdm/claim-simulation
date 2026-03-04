@@ -1,17 +1,15 @@
 mod model;
 mod portfolio;
-mod portfolio_v2;
 mod simulator;
-mod simulator_v2;
+mod simulator_multiyear;
 
 use std::path::Path;
 use std::time::Instant;
 
 use model::FrequencyModel;
-use portfolio::load_from_csv;
-use portfolio_v2::load_v2_from_csv;
+use portfolio::{load_from_csv, load_multiyear_from_csv};
 use simulator::{print_stats, run_parallel};
-use simulator_v2::{print_stats as print_stats_v2, run_parallel as run_parallel_v2};
+use simulator_multiyear::{print_stats as print_stats_multiyear, run_parallel as run_parallel_multiyear};
 
 // --- v1: single-year simulation (original) ---
 const N_SIMS: usize = 10_000;
@@ -67,14 +65,14 @@ fn main() -> anyhow::Result<()> {
     print_stats(&results, total_exposure);
 
     // ── v2: multi-year ───────────────────────────────────────────────────────
-    println!("=== v2: multi-year simulation ({} years) ===", simulator_v2::N_YEARS);
-    println!("Loading v2 portfolio from {} ...", PORTFOLIO_PATH_V2);
-    let policies_v2 = load_v2_from_csv(Path::new(PORTFOLIO_PATH_V2))?;
+    println!("=== v2: multi-year simulation ({} years) ===", simulator_multiyear::N_YEARS);
+    println!("Loading multi-year portfolio from {} ...", PORTFOLIO_PATH_V2);
+    let policies_v2 = load_multiyear_from_csv(Path::new(PORTFOLIO_PATH_V2))?;
     println!("Portfolio: {} policies", policies_v2.len());
 
     println!("Running {} multi-year simulations in parallel ...", N_SIMS_V2);
     let t0_v2  = Instant::now();
-    let res_v2 = run_parallel_v2(Path::new(MODEL_PATH_V2), &policies_v2, N_SIMS_V2);
+    let res_v2 = run_parallel_multiyear(Path::new(MODEL_PATH_V2), &policies_v2, N_SIMS_V2);
     let elapsed_v2 = t0_v2.elapsed();
 
     println!(
@@ -82,7 +80,7 @@ fn main() -> anyhow::Result<()> {
         elapsed_v2,
         elapsed_v2.as_millis() as f64 / N_SIMS_V2 as f64
     );
-    print_stats_v2(&res_v2, policies_v2.len());
+    print_stats_multiyear(&res_v2, policies_v2.len());
 
     Ok(())
 }

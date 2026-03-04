@@ -7,7 +7,7 @@ use rand_distr::{Distribution, Poisson};
 use rayon::prelude::*;
 
 use crate::model::FrequencyModel;
-use crate::portfolio_v2::PolicyV2;
+use crate::portfolio::PolicyMultiYear;
 
 /// Number of projection years.
 pub const N_YEARS: usize = 5;
@@ -29,7 +29,7 @@ pub struct YearResult {
 ///
 /// Exposure at t=0 uses the value from the portfolio (fraction of year active).
 /// For t=1..N_YEARS-1 exposure = 1.0 (full renewal years).
-fn run_one(model: &mut FrequencyModel, policies: &[PolicyV2], seed: u64) -> [YearResult; N_YEARS] {
+fn run_one(model: &mut FrequencyModel, policies: &[PolicyMultiYear], seed: u64) -> [YearResult; N_YEARS] {
     let n = policies.len();
     let mut rng = SmallRng::seed_from_u64(seed);
 
@@ -106,7 +106,7 @@ fn run_one(model: &mut FrequencyModel, policies: &[PolicyV2], seed: u64) -> [Yea
 /// is zero lock contention — the Mutex is just a safe way to hold &mut access.
 pub fn run_parallel(
     model_path: &Path,
-    policies:   &[PolicyV2],
+    policies:   &[PolicyMultiYear],
     n_sims:     usize,
 ) -> Vec<[YearResult; N_YEARS]> {
     let n_threads = rayon::current_num_threads();
