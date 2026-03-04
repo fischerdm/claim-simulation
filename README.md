@@ -44,11 +44,10 @@ claim-simulation/
     │   └── config.toml                 # sets ORT_DYLIB_PATH so cargo run works without extra setup
     ├── src/
     │   ├── main.rs                     # entry point — runs v1 then v2 with timings
-    │   ├── model.rs                    # ONNX inference (shared by v1 and v2)
-    │   ├── portfolio.rs                # v1 Policy struct and CSV loader
-    │   ├── portfolio_v2.rs             # v2 PolicyV2 struct with claim history seed
-    │   ├── simulator.rs                # v1 single-year parallel simulation
-    │   └── simulator_v2.rs             # v2 multi-year parallel simulation
+    │   ├── model.rs                    # ONNX inference (shared by both simulations)
+    │   ├── portfolio.rs                # Policy (single-year) and PolicyMultiYear structs + CSV loaders
+    │   ├── simulator.rs                # single-year parallel simulation
+    │   └── simulator_multiyear.rs      # multi-year parallel simulation
     └── Cargo.toml
 ```
 
