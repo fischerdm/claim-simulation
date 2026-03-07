@@ -105,6 +105,104 @@ pub fn load_from_csv(path: &Path) -> anyhow::Result<Vec<Policy>> {
     Ok(policies)
 }
 
+// ── Multi-year portfolio ──────────────────────────────────────────────────────
+
+/// A single insurance policy for the multi-year simulation.
+///
+/// Differences vs `Policy` (single-year):
+///   - No `bonus_malus` field (dropped — too hard to project forward)
+///   - `claims_hist: [u32; 3]` — synthetic claim history seed for the rolling
+///     3-year window: [t=-3 (oldest), t=-2, t=-1 (most recent)]
+///
+/// Feature order in `to_feature_row()` must match `ALL_FEATURES` in train.py (V2):
+///   [VehPower, VehAge, DrivAge, Density, Area, VehBrand, VehGas, Region, PriorClaims3Y]
+pub struct PolicyMultiYear {
+    // Stable features — do not change across simulation years
+    pub veh_power: f32,
+    pub density:   f32,
+    pub area:      f32,
+    pub veh_brand: f32,
+    pub veh_gas:   f32,
+    pub region:    f32,
+
+    // Dynamic features — baseline at t=0, incremented each projection year
+    pub veh_age:  f32,
+    pub driv_age: f32,
+
+    // Exposure at t=0; simulation years t=1..4 always use exposure=1.0
+    pub exposure: f32,
+
+    // Synthetic claim history seed: [oldest=t-3, t-2, newest=t-1].
+    // The simulator maintains a rolling window, shifting one position each year.
+    pub claims_hist: [u32; 3],
+}
+
+impl PolicyMultiYear {
+    /// Returns the 9-element feature vector the v2 ONNX model expects.
+    ///
+    /// `veh_age`, `driv_age`, and `prior_claims_3y` are passed in (not read
+    /// from `self`) because they change every projection year.
+    pub fn to_feature_row(&self, veh_age: f32, driv_age: f32, prior_claims_3y: f32) -> [f32; 9] {
+        [
+            self.veh_power,
+            veh_age,
+            driv_age,
+            self.density,
+            self.area,
+            self.veh_brand,
+            self.veh_gas,
+            self.region,
+            prior_claims_3y,
+        ]
+    }
+}
+
+/// CSV row written by python/export_portfolio.py (v2 section).
+#[derive(Deserialize)]
+struct PortfolioRowMultiYear {
+    veh_power:     f32,
+    veh_age:       f32,
+    driv_age:      f32,
+    density:       f32,
+    area:          f32,
+    veh_brand:     f32,
+    veh_gas:       f32,
+    region:        f32,
+    exposure:      f32,
+    claims_hist_1: u32, // t = -3 (oldest)
+    claims_hist_2: u32, // t = -2
+    claims_hist_3: u32, // t = -1 (most recent)
+}
+
+/// Load a multi-year portfolio from `data/portfolio_v2.csv`.
+pub fn load_multiyear_from_csv(path: &Path) -> anyhow::Result<Vec<PolicyMultiYear>> {
+    let mut rdr = csv::Reader::from_path(path)
+        .with_context(|| format!("failed to open multi-year portfolio CSV at {}", path.display()))?;
+
+    rdr.deserialize()
+        .enumerate()
+        .map(|(i, result)| {
+            let row: PortfolioRowMultiYear = result.with_context(|| {
+                format!("failed to parse row {} in multi-year portfolio CSV", i + 1)
+            })?;
+            Ok(PolicyMultiYear {
+                veh_power:   row.veh_power,
+                veh_age:     row.veh_age,
+                driv_age:    row.driv_age,
+                density:     row.density,
+                area:        row.area,
+                veh_brand:   row.veh_brand,
+                veh_gas:     row.veh_gas,
+                region:      row.region,
+                exposure:    row.exposure,
+                claims_hist: [row.claims_hist_1, row.claims_hist_2, row.claims_hist_3],
+            })
+        })
+        .collect()
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 pub fn test_portfolio() -> Vec<Policy> {
     vec![

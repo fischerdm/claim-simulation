@@ -1,17 +1,21 @@
 """
 export_onnx.py
 --------------
-Converts the trained LightGBM Poisson frequency model to ONNX format
-for fast inference in the Rust simulation engine via the `ort` crate.
+Converts trained LightGBM frequency models to ONNX for inference in Rust.
+
+Exports both models in one run:
+  v1 — frequency_model.onnx    (9 features incl. BonusMalus)
+  v2 — frequency_model_v2.onnx (9 features incl. PriorClaims3Y)
 
 Important notes on the ONNX graph:
-- Input:  float32 tensor of shape [N, n_features] — ALL_FEATURES in order
-- Output: float32 tensor of shape [N, 1] — annual claim frequency λ (already exponentiated).
-          onnxmltools preserves LightGBM's exp() transform, so the output is λ not log(λ).
-          The Rust code multiplies by exposure to get the expected claim count: μ = λ × exposure.
-- Categoricals are label-encoded integers passed as float32 (LightGBM ONNX convention).
+- Input:  float32 tensor of shape [N, n_features]
+- Output: float32 tensor of shape [N, 1] — annual claim frequency λ (already
+          exponentiated). onnxmltools preserves LightGBM's exp() transform.
+          Rust multiplies by exposure to get expected claim count: μ = λ × exposure.
+- Categoricals are label-encoded integers passed as float32.
 
 Usage:
+    python python/train.py       # must run first
     python python/export_onnx.py
 """
 
@@ -31,97 +35,68 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 MODELS_DIR = Path(__file__).parent.parent / "models"
-MODEL_PATH = MODELS_DIR / "frequency_model.lgb"
-ONNX_PATH = MODELS_DIR / "frequency_model.onnx"
-META_PATH = MODELS_DIR / "feature_metadata.json"
+
+# (lgb model path, onnx output path, metadata path)
+EXPORT_TARGETS = [
+    (
+        MODELS_DIR / "frequency_model.lgb",
+        MODELS_DIR / "frequency_model.onnx",
+        MODELS_DIR / "feature_metadata.json",
+    ),
+    (
+        MODELS_DIR / "frequency_model_v2.lgb",
+        MODELS_DIR / "frequency_model_v2.onnx",
+        MODELS_DIR / "feature_metadata_v2.json",
+    ),
+]
 
 
-def load_model() -> tuple[lgb.Booster, dict]:
-    if not MODEL_PATH.exists():
+def export_model(lgb_path: Path, onnx_path: Path, meta_path: Path) -> None:
+    """Load, convert to ONNX, validate, and save one model."""
+    if not lgb_path.exists():
         raise FileNotFoundError(
-            f"Model not found at {MODEL_PATH}. Run python/train.py first."
+            f"Model not found at {lgb_path}. Run python/train.py first."
         )
-    booster = lgb.Booster(model_file=str(MODEL_PATH))
-    logger.info("Loaded LightGBM model from %s", MODEL_PATH)
 
-    with open(META_PATH) as f:
+    booster = lgb.Booster(model_file=str(lgb_path))
+    with open(meta_path) as f:
         metadata = json.load(f)
-    logger.info("Loaded feature metadata: %d features", len(metadata["feature_names"]))
+    n_features = len(metadata["feature_names"])
 
-    return booster, metadata
+    logger.info("── Exporting %s (%d features) ──", lgb_path.name, n_features)
+    logger.info("  Features: %s", metadata["feature_names"])
 
-
-def export_onnx(booster: lgb.Booster, n_features: int) -> None:
-    """
-    Convert LightGBM booster to ONNX using onnxmltools.
-
-    The initial_types specification tells the converter the input shape.
-    All features are passed as a single float32 matrix.
-    """
+    # Convert
     initial_types = [("float_input", FloatTensorType([None, n_features]))]
-
-    logger.info("Converting to ONNX (n_features=%d)...", n_features)
-    onnx_model = convert_lightgbm(
-        booster,
-        initial_types=initial_types,
-        target_opset=15,
-    )
-
-    with open(ONNX_PATH, "wb") as f:
+    onnx_model = convert_lightgbm(booster, initial_types=initial_types, target_opset=15)
+    with open(onnx_path, "wb") as f:
         f.write(onnx_model.SerializeToString())
+    logger.info("  Saved to %s (%.1f KB)", onnx_path, onnx_path.stat().st_size / 1024)
 
-    size_kb = ONNX_PATH.stat().st_size / 1024
-    logger.info("Saved ONNX model to %s (%.1f KB)", ONNX_PATH, size_kb)
-
-
-def validate_onnx(booster: lgb.Booster, n_features: int) -> None:
-    """
-    Run a quick sanity check: compare LightGBM Python predictions
-    vs ONNX Runtime predictions on random inputs.
-    """
-    logger.info("Validating ONNX output against LightGBM Python predictions...")
-
-    rng = np.random.default_rng(42)
-    X = rng.standard_normal((500, n_features)).astype(np.float32)
-
-    # LightGBM predictions (log scale, no offset)
+    # Validate: compare LightGBM Python vs ONNX Runtime on random inputs
+    rng       = np.random.default_rng(42)
+    X         = rng.standard_normal((500, n_features)).astype(np.float32)
     lgb_preds = booster.predict(X)
 
-    # ONNX Runtime predictions
-    sess = rt.InferenceSession(str(ONNX_PATH), providers=["CPUExecutionProvider"])
-    input_name = sess.get_inputs()[0].name
+    sess        = rt.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    input_name  = sess.get_inputs()[0].name
     output_name = sess.get_outputs()[0].name
-    onnx_preds = sess.run([output_name], {input_name: X})[0].flatten()
+    onnx_preds  = sess.run([output_name], {input_name: X})[0].flatten()
 
     max_diff = np.max(np.abs(lgb_preds - onnx_preds))
-    mean_diff = np.mean(np.abs(lgb_preds - onnx_preds))
-    logger.info("Max absolute difference:  %.2e", max_diff)
-    logger.info("Mean absolute difference: %.2e", mean_diff)
-
-    if max_diff < 1e-4:
-        logger.info("✓ ONNX export validated successfully.")
-    else:
-        logger.warning(
-            "⚠ Differences exceed 1e-4. This may be acceptable for tree models "
-            "due to float32 vs float64 precision. Inspect carefully."
-        )
-
-    # Log a few sample predictions for manual inspection
-    logger.info("Sample LightGBM preds (λ): %s", np.round(lgb_preds[:5], 4))
-    logger.info("Sample ONNX preds     (λ): %s", np.round(onnx_preds[:5], 4))
+    logger.info(
+        "  Max abs diff LGB vs ONNX: %.2e — %s",
+        max_diff,
+        "OK" if max_diff < 1e-4 else "WARN: exceeds 1e-4, inspect carefully",
+    )
+    logger.info("  Sample LGB λ:  %s", np.round(lgb_preds[:5], 4))
+    logger.info("  Sample ONNX λ: %s", np.round(onnx_preds[:5], 4))
+    logger.info("  Done.\n")
 
 
 def main() -> None:
-    booster, metadata = load_model()
-    n_features = len(metadata["feature_names"])
-    export_onnx(booster, n_features)
-    validate_onnx(booster, n_features)
-    logger.info(
-        "\nONNX model ready at %s\n"
-        "Rust usage: input float32[N, %d], output is λ (annual frequency) — multiply by exposure to get μ.",
-        ONNX_PATH,
-        n_features,
-    )
+    for lgb_path, onnx_path, meta_path in EXPORT_TARGETS:
+        export_model(lgb_path, onnx_path, meta_path)
 
 
 if __name__ == "__main__":
