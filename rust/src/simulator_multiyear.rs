@@ -1,5 +1,6 @@
-use std::path::Path;
-use std::sync::Mutex;
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
@@ -8,6 +9,13 @@ use rayon::prelude::*;
 
 use crate::model::FrequencyModel;
 use crate::portfolio::Policy;
+
+// One ONNX session per Rayon worker thread, initialized lazily on first use.
+// This avoids paying N_THREADS × load_time upfront regardless of how many
+// threads actually receive work (critical on large machines with many cores).
+thread_local! {
+    static THREAD_MODEL: RefCell<Option<FrequencyModel>> = RefCell::new(None);
+}
 
 /// Per-year aggregate result for one simulation run.
 pub struct YearResult {
@@ -90,40 +98,47 @@ fn run_one(
 
 /// Run `n_sims` multi-year simulations in parallel using Rayon.
 ///
-/// Key architectural point: from year 1 onward each simulation has its own
-/// distinct PriorClaims3Y (because the Poisson draws in year 0 differ).
-/// We therefore need an independent ONNX session per simulation.  Loading
-/// n_sims separate sessions would be wasteful, so we pre-allocate exactly
-/// one session per Rayon worker thread and reuse it across that thread's sims.
+/// Each simulation is independent: from year 1 onward every sim has its own
+/// distinct PriorClaims3Y driven by its own Poisson draws, so ONNX must be
+/// called separately per simulation per year.
 ///
-/// rayon::current_thread_index() returns the index of the calling worker in
-/// [0, n_threads), which we use to index into the per-thread model pool.
-/// Since each Rayon thread only ever calls models[its_own_index].lock(), there
-/// is zero lock contention — the Mutex is just a safe way to hold &mut access.
+/// Session management: ONNX sessions are held in thread-local storage
+/// (see `THREAD_MODEL`) and initialised lazily on the first simulation each
+/// worker thread receives.  This has two advantages over pre-allocating
+/// N_THREADS sessions upfront:
+///
+/// 1. **No blocking startup cost.**  Pre-allocation is sequential and pays
+///    load_time × N_THREADS before a single simulation runs (~30 s/session on
+///    this machine → 48 min wasted startup on a 96-core box).  With lazy init
+///    sessions load in parallel as Rayon dispatches the first wave of work;
+///    wall-clock overhead ≈ one session load time regardless of core count.
+///
+/// 2. **Cores are not over-provisioned.**  For small grids (e.g. QUICK_TEST)
+///    only the threads that receive work ever load a session.
 pub fn run_parallel(
     model_path: &Path,
     policies:   &[Policy],
     n_sims:     usize,
     n_years:    usize,
 ) -> Vec<Vec<YearResult>> {
-    let n_threads = rayon::current_num_threads();
-
-    // Load one FrequencyModel per Rayon worker thread.
-    let models: Vec<Mutex<FrequencyModel>> = (0..n_threads)
-        .map(|_| {
-            Mutex::new(
-                FrequencyModel::load(model_path)
-                    .expect("failed to load ONNX model for thread"),
-            )
-        })
-        .collect();
+    // Share the path with worker threads without copying the string N times.
+    let model_path: Arc<PathBuf> = Arc::new(model_path.to_path_buf());
 
     (0..n_sims)
         .into_par_iter()
         .map(|sim_i| {
-            let idx   = rayon::current_thread_index().unwrap_or(0);
-            let mut m = models[idx].lock().unwrap();
-            run_one(&mut m, policies, sim_i as u64, n_years)
+            let path = Arc::clone(&model_path);
+            THREAD_MODEL.with(|cell| {
+                let mut opt = cell.borrow_mut();
+                // Initialize this thread's session on first use.
+                if opt.is_none() {
+                    *opt = Some(
+                        FrequencyModel::load(&path)
+                            .expect("failed to load ONNX model for thread"),
+                    );
+                }
+                run_one(opt.as_mut().unwrap(), policies, sim_i as u64, n_years)
+            })
         })
         .collect()
 }

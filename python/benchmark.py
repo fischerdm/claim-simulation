@@ -175,8 +175,26 @@ def build_rust() -> bool:
     return True
 
 
+def _ort_dylib_path() -> str | None:
+    """Return the path to the ONNX Runtime shared library used by this Python env."""
+    try:
+        import onnxruntime
+        capi_dir = Path(onnxruntime.__file__).parent / "capi"
+        # Match libonnxruntime.*.dylib (versioned name) or libonnxruntime.dylib
+        candidates = sorted(capi_dir.glob("libonnxruntime*.dylib"))
+        if candidates:
+            return str(candidates[0])
+    except Exception:
+        pass
+    return None
+
+
 def run_rust_cell(fraction: float, n_sims: int, n_years: int) -> dict | None:
     """Run the Rust binary for one (fraction, n_sims, n_years) cell."""
+    env = os.environ.copy()
+    dylib = _ort_dylib_path()
+    if dylib:
+        env["ORT_DYLIB_PATH"] = dylib
     result = subprocess.run(
         [
             str(RUST_BINARY),
@@ -185,6 +203,7 @@ def run_rust_cell(fraction: float, n_sims: int, n_years: int) -> dict | None:
             "--years",    str(n_years),
         ],
         cwd=RUST_DIR,
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
