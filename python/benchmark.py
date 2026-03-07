@@ -195,11 +195,6 @@ def run_rust_cell(fraction: float, n_sims: int, n_years: int) -> dict | None:
     dylib = _ort_dylib_path()
     if dylib:
         env["ORT_DYLIB_PATH"] = dylib
-    # In QUICK_TEST mode limit Rayon threads to 1 so only 1 ONNX session is
-    # loaded per invocation.  Loading each session takes ~30 s on this machine;
-    # 8 threads × 30 s × 8 grid cells ≈ 32 min startup overhead otherwise.
-    if QUICK_TEST:
-        env.setdefault("RAYON_NUM_THREADS", "1")
     result = subprocess.run(
         [
             str(RUST_BINARY),
