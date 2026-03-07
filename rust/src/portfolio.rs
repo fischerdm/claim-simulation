@@ -115,7 +115,7 @@ pub fn load_from_csv(path: &Path) -> anyhow::Result<Vec<Policy>> {
 ///     3-year window: [t=-3 (oldest), t=-2, t=-1 (most recent)]
 ///
 /// Feature order in `to_feature_row()` must match `ALL_FEATURES` in train.py (V2):
-///   [VehPower, VehAge, DrivAge, Density, Area, VehBrand, VehGas, Region, PriorClaims3Y]
+///   [VehPower, VehAge, DrivAge, Density, PriorClaims3Y, Area, VehBrand, VehGas, Region]
 pub struct PolicyMultiYear {
     // Stable features — do not change across simulation years
     pub veh_power: f32,
@@ -148,11 +148,11 @@ impl PolicyMultiYear {
             veh_age,
             driv_age,
             self.density,
+            prior_claims_3y,
             self.area,
             self.veh_brand,
             self.veh_gas,
             self.region,
-            prior_claims_3y,
         ]
     }
 }

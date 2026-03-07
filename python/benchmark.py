@@ -190,8 +190,8 @@ def _simulate_v2_chunk(seeds: list[int]) -> list[list[float]]:
     """
     Run one 5-year simulation per seed.
 
-    Feature order sent to ONNX (matches Rust portfolio.rs to_feature_row):
-        [VehPower, VehAge, DrivAge, Density, Area, VehBrand, VehGas, Region, PriorClaims3Y]
+    Feature order sent to ONNX (matches train.py ALL_FEATURES for V2):
+        [VehPower, VehAge, DrivAge, Density, PriorClaims3Y, Area, VehBrand, VehGas, Region]
 
     static_features columns:
         0: veh_power  1: density  2: area  3: veh_brand  4: veh_gas  5: region
@@ -214,16 +214,18 @@ def _simulate_v2_chunk(seeds: list[int]) -> list[list[float]]:
             prior_3y = hist.sum(axis=1).astype(np.float32)  # [N]
 
             # Build [N, 9] feature matrix.
+            # Column order must match ALL_FEATURES in train.py (V2):
+            #   [VehPower, VehAge, DrivAge, Density, PriorClaims3Y, Area, VehBrand, VehGas, Region]
             features = np.column_stack([
                 _worker_v2_static[:, 0],  # veh_power
                 veh_age,
                 driv_age,
                 _worker_v2_static[:, 1],  # density
+                prior_3y,                 # prior_claims_3y
                 _worker_v2_static[:, 2],  # area
                 _worker_v2_static[:, 3],  # veh_brand
                 _worker_v2_static[:, 4],  # veh_gas
                 _worker_v2_static[:, 5],  # region
-                prior_3y,                 # prior_claims_3y
             ]).astype(np.float32)
 
             lambdas = _worker_v2_sess.run(
