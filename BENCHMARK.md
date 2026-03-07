@@ -1,7 +1,8 @@
 # Benchmark Study
 
-This document describes the benchmark study design, scaling grids, and expected
-runtimes for the two studies run by `python/benchmark.py`.
+This document describes the benchmark study design, the session-loading constraint,
+how to calibrate expected runtimes, and how many simulations are sufficient for
+different actuarial use cases.
 
 ## What we are measuring
 
@@ -63,18 +64,20 @@ tree ensemble to an optimised execution plan that avoids it. The gap grows with 
 
 ### Architecture
 
-Each Rayon worker thread owns one ONNX session (loaded at startup).
-Simulations are distributed across threads — no lock contention, no serialisation.
+Each Rayon worker thread owns one ONNX session, **loaded lazily on first use** (not at
+startup). Simulations are distributed across threads via work-stealing with no lock
+contention between threads once sessions are warm.
 
 ```
 n_threads worker threads (one per core)
 │
 ├── Thread 0: sims 0, 1, ..., n_sims/n_threads - 1
+│   ├── [first sim only] load ONNX session  ← lazy, ~25–30 s one-time cost
 │   └── for each sim:
 │       └── for year in 0..n_years:
 │           ├── build [N, 9] feature matrix
-│           ├── run_inference(matrix) → λ per policy   ← ONNX (single-threaded)
-│           ├── draw Poisson(λ × exposure) per policy  ← Rayon parallel
+│           ├── run_inference(matrix) → λ per policy   ← ONNX call
+│           ├── draw Poisson(λ × exposure) per policy
 │           └── shift rolling 3-year claim window
 ├── Thread 1: sims n_sims/n_threads, ...
 └── ...
@@ -100,12 +103,103 @@ draws in year 0 differ), so inference cannot be hoisted out of the sim loop.
 
 ---
 
+## The session-loading constraint
+
+ONNX Runtime holds a global lock during session initialisation. Even though Rayon
+dispatches all threads simultaneously, sessions load **sequentially**, costing roughly:
+
+```
+T_startup ≈ n_threads × 25 s   (observed ~25 s/session on macOS Intel)
+```
+
+This matters in two ways:
+
+1. **Small portfolios are startup-dominated.** For 50–100 policies the actual simulation
+   compute takes milliseconds — far less than the session loading overhead. The quick-test
+   results (`QUICK_TEST=1`) essentially measure startup time only and cannot be used to
+   extrapolate compute throughput.
+
+2. **Linear core scaling breaks down for high core counts.** More cores reduce per-thread
+   sim count (good), but also increase total session loading time (bad). The optimal
+   thread count balances these two effects:
+
+   ```
+   T_total(k) = k × T_session + (n_sims / k) × n_years × T_inference(N)
+   ```
+
+   Optimal k ≈ √(n_sims × n_years × T_inference(N) / T_session)
+
+   For production workloads (678K policies, 2500 sims, 5 years):
+   - T_inference(678K) ≈ 200 ms / inference call
+   - T_session ≈ 25 s
+   - Optimal k ≈ √(2500 × 5 × 0.2 / 25) ≈ √100 = **10 threads**
+
+   Beyond ~10–16 cores, session loading time grows faster than compute time shrinks.
+   AWS cost efficiency peaks well before the largest available instances.
+
+---
+
+## Calibration run (recommended before capacity planning)
+
+The quick test is too small to measure compute throughput. Before estimating AWS costs,
+run one compute-dominated measurement on your local machine:
+
+```bash
+ORT_DYLIB_PATH=.venv/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.1.23.2.dylib \
+  rust/target/release/claim-simulation --fraction 1.0 --n-sims 500 --years 5
+```
+
+This runs the full 10K-policy portfolio for 500 sims × 5 years. From the output:
+
+```
+T_total  = reported wall time
+T_startup = n_threads × 25 s          (or measure separately with --n-sims 1)
+T_compute = T_total - T_startup
+
+throughput = (10_000 × 500 × 5) / T_compute   # policy-sim-years per second
+```
+
+With `throughput` you can estimate any (N, n_sims, n_years, n_threads) combination:
+
+```
+T_wall ≈ n_threads × T_session + (N × n_sims × n_years) / (throughput × n_threads)
+```
+
+> **Note:** session loading time on Linux (AWS) will differ from macOS. Once you have
+> one real AWS data point, replace `T_session` with the observed value.
+
+---
+
+## How many simulations are enough?
+
+The required simulation count depends on which statistic you care about. The standard
+error on a quantile estimate at level p with n simulations is approximately
+`SE ≈ √(p(1−p)) / (n × f(Qₚ))` where f(Qₚ) is the density at the quantile.
+
+| Use case | Target statistic | Recommended n_sims |
+|---|---|---|
+| Pricing / expected loss | Mean frequency | 500–1,000 |
+| Reserving, confidence intervals | P95 | 1,000–2,000 |
+| Capital / risk margin | P99 | 2,000–5,000 |
+| Solvency II / regulatory capital | P99.5 (SCR) | 5,000–10,000 |
+
+**Default recommendation: 2,500 sims.** This gives reliable P99 estimates
+(≈ 0.2% SE in probability space) at a reasonable compute cost for most pricing and
+reserving tasks. If you specifically need Solvency II–grade tail estimates, use 5,000+.
+
+Rule of thumb: run a pilot with 500 sims, then double until your P99 estimate stabilises
+to within 1% relative change. For this dataset (mean frequency ≈ 10%), 2,500 sims is
+typically sufficient.
+
+---
+
 ## Runtime estimates
 
-Rough estimates based on ~300 ns per policy per ONNX call on a single thread
-(LightGBM ensemble, ~400 trees, 63 leaves).
+These are **order-of-magnitude** estimates built on two components:
+- T_inference ≈ 300 ns per policy per ONNX call (LightGBM ensemble, ~400 trees)
+- T_session ≈ 25 s per thread (sequential; Linux/AWS value unknown until measured)
 
-### Per-simulation cost
+### Per-simulation cost (compute only, excludes startup)
 
 | Fraction | Policies | n_years=1 | n_years=5 |
 |---|---|---|---|
@@ -113,36 +207,54 @@ Rough estimates based on ~300 ns per policy per ONNX call on a single thread
 | 50% | ~340K | ~100 ms | ~500 ms |
 | 100% | ~678K | ~200 ms | ~1,000 ms |
 
-### Wall-clock estimate (Study 2 only, all 18 cells)
+### Wall-clock estimate — full benchmark, 2,500 sims × 5 years × 678K policies
 
-| Machine | Cores | n_years=1 total | n_years=5 total | **Full study** |
-|---|---|---|---|---|
-| Intel MacBook (4 cores) | 4 | ~15 min | ~60 min | **~75 min** |
-| AWS c5.4xlarge | 16 | ~4 min | ~15 min | **~20 min** |
-| AWS c5.18xlarge | 72 | ~1 min | ~4 min | **~5 min** |
-| AWS c5.metal | 96 phys. | < 1 min | ~3 min | **~4 min** |
+The table below includes sequential session-loading overhead.
 
-Speedup from cores is **nearly linear** — the Rayon parallelism is embarrassingly
-parallel over simulations, with zero lock contention between threads.
+| Machine | Cores (k) | T_startup | T_compute | **T_total** | On-demand $/hr | **Est. cost** |
+|---|---|---|---|---|---|---|
+| Intel MacBook (dev) | 8 | 3 min | 45 min | **~48 min** | — | — |
+| AWS c6i.2xlarge | 8 | 3 min | 45 min | **~48 min** | $0.34 | **$0.27** |
+| AWS c6i.4xlarge | 16 | 7 min | 22 min | **~29 min** | $0.68 | **$0.33** |
+| AWS c6i.8xlarge | 32 | 13 min | 11 min | **~24 min** | $1.36 | **$0.54** |
+| AWS c6i.16xlarge | 64 | 27 min | 6 min | **~33 min** | $2.72 | **$1.50** |
+| AWS c6i.32xlarge | 128 | 53 min | 3 min | **~56 min** | $5.44 | **$5.08** |
 
-Study 1 (inference) adds < 2 minutes regardless of machine.
+**Key observation:** the c6i.4xlarge (16 cores, ~$0.33) offers the best cost-time
+balance for this workload. Beyond 16–32 cores, session loading overhead grows faster
+than compute time shrinks and cost efficiency degrades sharply.
 
-> **Note:** these are order-of-magnitude estimates. Actual ONNX throughput depends on
-> tree depth, memory bandwidth, and ONNX Runtime version. Run the quick test first
-> (see below) to calibrate.
+> Spot instances reduce on-demand price by 60–70% for interruptible workloads.
+> The full benchmark (18 cells) runs in a single process invocation, so interruption
+> risk is low for runs under ~30 minutes.
+
+> These numbers will shift on Linux. Replace T_session with your observed value from
+> the calibration run above before making instance decisions.
 
 ---
 
 ## Running locally
 
-### Quick test (recommended before a full run)
+### Quick test (pipeline validation only)
 
 ```bash
 QUICK_TEST=1 python python/benchmark.py
 ```
 
-Uses a tiny grid (0.5% / 1% of portfolio, 200 / 500 sims) — completes in **< 1 minute**.
-Validates the full pipeline end-to-end without waiting for a long run.
+Uses a tiny grid (0.5% / 1% of portfolio, 200 / 500 sims). Validates the full
+pipeline end-to-end. **Not suitable for extrapolating compute throughput** — these
+tiny portfolios are dominated by ONNX session loading time (~25 s/thread), not actual
+simulation compute.
+
+### Calibration run (throughput measurement)
+
+```bash
+# Run the Rust binary directly — no Python overhead, full 10K portfolio
+ORT_DYLIB_PATH=... rust/target/release/claim-simulation \
+  --fraction 1.0 --n-sims 500 --years 5
+```
+
+Use the output to estimate compute throughput (see *Calibration run* section above).
 
 ### Full benchmark
 
@@ -164,8 +276,6 @@ results from different machines can be compared directly.
 cd rust && cargo build --release && cd ..
 python python/benchmark.py
 ```
-
-For large instances (c5.18xlarge+) the full study completes in ~5 minutes.
 
 ---
 
@@ -194,5 +304,4 @@ Study 2 — Simulation: Rust + ONNX  (ms / simulation)
 ### CSV (`results/benchmark_results.csv`)
 
 One row per (study, engine, fraction, n_sims, n_years) combination, plus a `n_cores`
-column. Designed to stack results from multiple machines for cross-instance comparison
-in the AWS session.
+column. Designed to stack results from multiple machines for cross-instance comparison.
