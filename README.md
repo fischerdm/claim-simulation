@@ -1,16 +1,36 @@
 # Claim Simulation
 
-Non-life actuarial frequency model trained in Python (LightGBM + Poisson) and exported to ONNX
-for high-speed claim simulation in Rust. The project demonstrates how to speed up a realistic
-actuarial Monte Carlo simulation using Rust and Rayon, while keeping the modelling in Python.
+Non-life actuarial frequency model trained in Python (LightGBM + Poisson) and exported
+to ONNX for high-speed recursive claim simulation in Rust.
 
-Two simulation modes are implemented:
+The project has two goals:
 
-- **v1 — single year:** λ is computed once for all policies; 10,000 simulations draw Poisson(λ)
-  in parallel. Classic setup, maximum throughput.
-- **v2 — multi-year (5 years):** claim history feeds back into the model each year. After each
-  draw, the rolling 3-year claim window updates PriorClaims3Y, and λ is recomputed. Each Rayon
-  worker thread owns its own ONNX session to avoid contention.
+1. **Is ONNX faster than native LightGBM for batch inference?**
+   Relevant for the common single-year use case where you want a point estimate of λ per
+   policy, not a full simulation.
+
+2. **How fast can a multi-year recursive simulation be?**
+   Each year, `PriorClaims3Y` (a rolling 3-year claim count) is updated from the draws of
+   the previous year, so λ must be recomputed annually. There is no closed-form alternative.
+   The Rust + ONNX engine parallelises across simulations using Rayon, with each worker
+   thread owning its own ONNX session.
+
+See [BENCHMARK.md](BENCHMARK.md) for the full study design, scaling grids, and runtime
+estimates on different hardware.
+
+## Model
+
+The **v2 frequency model** is used for all studies:
+
+| Feature | Notes |
+|---|---|
+| VehPower, VehAge, DrivAge | Vehicle and driver characteristics |
+| Density | Population density of driver's municipality |
+| **PriorClaims3Y** | Rolling 3-year claim count — updated each simulation year |
+| Area, VehBrand, VehGas, Region | Categorical features (label-encoded) |
+
+BonusMalus is excluded — it cannot be projected forward without a separate BM transition
+model. PriorClaims3Y acts as a lightweight, simulatable experience feature.
 
 ## Project structure
 
@@ -19,58 +39,52 @@ claim-simulation/
 ├── data/
 │   ├── freMTPL2freq.csv                # raw dataset (generated, not in git)
 │   ├── freMTPL2freq_with_history.csv   # augmented with synthetic claim history (generated)
-│   ├── portfolio.csv                   # v1 portfolio for Rust (generated)
-│   ├── portfolio_v2.csv                # v2 portfolio — 10K sampled policies (generated)
-│   └── eda/                            # EDA and validation plots (generated)
+│   ├── portfolio.csv                   # v1 portfolio — kept for reference (generated)
+│   └── portfolio_v2.csv                # v2 portfolio — full 678K policies (generated)
 ├── models/
-│   ├── frequency_model.lgb             # v1 LightGBM model (generated)
-│   ├── frequency_model.onnx            # v1 ONNX export (generated)
-│   ├── feature_metadata.json           # v1 feature names and category encodings
 │   ├── frequency_model_v2.lgb          # v2 LightGBM model (generated)
 │   ├── frequency_model_v2.onnx         # v2 ONNX export (generated)
-│   └── feature_metadata_v2.json        # v2 feature names and category encodings
+│   └── feature_metadata_v2.json        # feature names and category encodings
 ├── python/
 │   ├── data/
 │   │   └── download.py                 # downloads freMTPL2freq from OpenML
 │   ├── generate_history.py             # creates synthetic 3-year claim history
-│   ├── train.py                        # trains both v1 and v2 LightGBM models
-│   ├── export_onnx.py                  # exports both models to ONNX
-│   ├── export_portfolio.py             # exports v1 and v2 portfolio CSVs for Rust
-│   ├── validate.py                     # validates LightGBM vs ONNX agreement (v1)
-│   ├── eda.py                          # exploratory data analysis, saves plots
-│   └── benchmark.py                    # Python simulation baseline for benchmarking
-└── rust/
-    ├── .cargo/
-    │   └── config.toml                 # sets ORT_DYLIB_PATH so cargo run works without extra setup
-    ├── src/
-    │   ├── main.rs                     # entry point — runs v1 then v2 with timings
-    │   ├── model.rs                    # ONNX inference (shared by both simulations)
-    │   ├── portfolio.rs                # Policy (single-year) and PolicyMultiYear structs + CSV loaders
-    │   ├── simulator.rs                # single-year parallel simulation
-    │   └── simulator_multiyear.rs      # multi-year parallel simulation
-    └── Cargo.toml
+│   ├── train.py                        # trains LightGBM models (v1 + v2)
+│   ├── export_onnx.py                  # exports models to ONNX
+│   ├── export_portfolio.py             # exports portfolio CSVs
+│   ├── validate.py                     # validates LightGBM vs ONNX agreement
+│   ├── eda.py                          # exploratory data analysis plots
+│   └── benchmark.py                    # runs both benchmark studies
+├── results/
+│   └── benchmark_results.csv           # timing results (generated, not in git)
+├── rust/
+│   ├── .cargo/
+│   │   └── config.toml                 # sets ORT_DYLIB_PATH for cargo run
+│   ├── src/
+│   │   ├── main.rs                     # CLI entry point (--n-sims, --years, --fraction)
+│   │   ├── model.rs                    # ONNX inference wrapper
+│   │   ├── portfolio.rs                # Policy struct and CSV loader
+│   │   └── simulator_multiyear.rs      # parallel multi-year simulation (Rayon)
+│   └── Cargo.toml
+└── BENCHMARK.md                        # study design and runtime estimates
 ```
 
 ## Dataset
 
-[freMTPL2freq](https://www.openml.org/d/41214) — French Motor Third Party Liability frequency data.
-678,013 policies with features: vehicle power, age, driver age, bonus-malus, region, etc.
-Target: `ClaimNb` (number of claims per policy). Downloaded automatically from OpenML.
+[freMTPL2freq](https://www.openml.org/d/41214) — French Motor Third Party Liability
+frequency data. 678,013 policies. Target: `ClaimNb`. Downloaded automatically from OpenML.
+
+---
 
 ## Setup
 
-### macOS prerequisite — OpenMP
-
-LightGBM on macOS requires the OpenMP runtime. Install it with Homebrew:
+### macOS — OpenMP (required for LightGBM)
 
 ```bash
 brew install libomp
 ```
 
-Without this, importing `lightgbm` fails with:
-```
-OSError: dlopen(...lib_lightgbm.dylib): Library not loaded: @rpath/libomp.dylib
-```
+Without this, `import lightgbm` fails with a missing `libomp.dylib` error.
 
 ### Python environment
 
@@ -82,12 +96,11 @@ pip install -e ".[dev]"
 
 ### Rust
 
-You need Rust installed (`rustup`). The engine links against the ONNX Runtime library that
-ships with the Python `onnxruntime` package — so the Python venv must be set up first.
+You need Rust installed (`rustup`). The Rust engine links against the ONNX Runtime
+library bundled with the Python `onnxruntime` package — set up the venv first.
 
-`rust/.cargo/config.toml` sets `ORT_DYLIB_PATH` automatically, so `cargo run` works without
-any additional environment variables. **If you clone this repo on a different machine**, check
-two version numbers in that file and adjust them:
+`rust/.cargo/config.toml` sets `ORT_DYLIB_PATH` automatically. **If you clone on a
+different machine**, update two version strings in that file:
 - `python3.12` → your Python minor version (`python3 --version`)
 - `1.23.2` → your onnxruntime version (`pip show onnxruntime`)
 
@@ -103,11 +116,7 @@ Run these scripts in order from the repo root.
 python python/data/download.py
 ```
 
-Downloads freMTPL2freq from OpenML and saves it to `data/freMTPL2freq.csv`.
-
-> **Note:** `dataset.get_data()` must specify `target="ClaimNb"` explicitly.
-> Without it, OpenML returns `y=None` and writes a blank `ClaimNb` column to the CSV,
-> causing LightGBM to fail with `[poisson]: sum of labels is zero`.
+Downloads freMTPL2freq from OpenML → `data/freMTPL2freq.csv`.
 
 ### 2. Generate synthetic claim history
 
@@ -115,33 +124,20 @@ Downloads freMTPL2freq from OpenML and saves it to `data/freMTPL2freq.csv`.
 python python/generate_history.py
 ```
 
-Uses the v1 ONNX model to generate a synthetic 3-year claim history for each policy by
-drawing `Poisson(λ)` three times per policy (one per historical year). This bootstraps the
-`PriorClaims3Y` feature needed to train the v2 model.
+Uses the v1 ONNX model to simulate a 3-year claim history for each policy by drawing
+`Poisson(λ)` three times. This bootstraps `PriorClaims3Y` needed to train the v2 model.
 
-Saves `data/freMTPL2freq_with_history.csv` with three individual history columns
-(`claims_hist_1`, `claims_hist_2`, `claims_hist_3`) so the Rust simulation can maintain
-the rolling window per policy.
+Saves `data/freMTPL2freq_with_history.csv` with columns `claims_hist_1/2/3`.
 
-### 3. Train the frequency models
+### 3. Train the models
 
 ```bash
 python python/train.py
 ```
 
-Trains two LightGBM Poisson models back-to-back using a shared `ModelSpec` dataclass:
-
-| | v1 | v2 |
-|---|---|---|
-| Features | VehPower, VehAge, DrivAge, **BonusMalus**, Density, Area, VehBrand, VehGas, Region | VehPower, VehAge, DrivAge, Density, Area, VehBrand, VehGas, Region, **PriorClaims3Y** |
-| BonusMalus | included | dropped — hard to project forward without a BM transition model |
-| PriorClaims3Y | — | sum of claims in the last 3 years (updated each simulation year) |
-
-Both use the Poisson objective with `log(Exposure)` as offset (annual frequency model)
-and early stopping on Poisson deviance.
-
-Saves `frequency_model.lgb` + `feature_metadata.json` (v1) and
-`frequency_model_v2.lgb` + `feature_metadata_v2.json` (v2).
+Trains two LightGBM Poisson models. The **v2 model** is used for all benchmarks:
+it replaces `BonusMalus` with `PriorClaims3Y` so claim history can be updated
+each simulation year. Both models use `log(Exposure)` as offset.
 
 ### 4. Export to ONNX
 
@@ -149,23 +145,20 @@ Saves `frequency_model.lgb` + `feature_metadata.json` (v1) and
 python python/export_onnx.py
 ```
 
-Converts both LightGBM models to ONNX using `onnxmltools`. For each model:
-- **Input:** float32 tensor `[N, 9]` — all features in order (categoricals as label-encoded integers cast to float32)
-- **Output:** float32 tensor `[N, 1]` — annual claim frequency λ per policy (already in original scale, not log scale)
+Converts both models to ONNX using `onnxmltools` (opset 15). Output is λ (annual
+frequency) in original scale — `onnxmltools` preserves LightGBM's internal `exp()`.
 
-Expected claims: `μ = λ × exposure`. Runs a validation check comparing LightGBM vs ONNX predictions.
+Expected claims: `μ = λ × exposure` (not `exp(log_λ + log_exposure)`).
 
-### 5. Export portfolios for Rust
+### 5. Export portfolio
 
 ```bash
 python python/export_portfolio.py
 ```
 
-Exports two CSVs used by the Rust engine:
-
-- **v1** `data/portfolio.csv` — full 678 K-policy portfolio, flat numeric CSV with `bonus_malus`.
-- **v2** `data/portfolio_v2.csv` — 10 K sampled policies (tractable for the multi-year loop),
-  with `claims_hist_1/2/3` as the rolling-window seed instead of `bonus_malus`.
+Exports `data/portfolio_v2.csv` — the full 678K-policy portfolio with `claims_hist_1/2/3`
+as the rolling-window seed. The Rust engine's `--fraction` arg then subsets this at
+runtime (e.g. `--fraction 0.25` → ~170K policies).
 
 ### 6. Validate *(optional)*
 
@@ -173,91 +166,58 @@ Exports two CSVs used by the Rust engine:
 python python/validate.py
 ```
 
-End-to-end sanity check (v1 only):
-- Compares LightGBM vs ONNX Runtime predictions (max diff, correlation)
-- Reports predicted vs actual portfolio frequency
-- Saves `data/eda/lgb_vs_onnx.png` scatter plot
-
-### 7. EDA *(optional)*
-
-```bash
-python python/eda.py
-```
-
-Produces plots in `data/eda/`: claim distribution, empirical frequency per feature, and
-correlation matrix of numeric features.
+Compares LightGBM vs ONNX predictions for the v1 model; reports max diff and
+portfolio frequency. Saves a scatter plot to `data/eda/`.
 
 ---
 
-## Rust simulation engine
-
-### How it works
-
-#### v1 — Single-year simulation
-
-1. Load `data/portfolio.csv` (678 K policies).
-2. Run ONNX inference **once** — all 10,000 simulations share the same λ values.
-3. Simulate in parallel (Rayon): each simulation draws `Poisson(λ × exposure)` per policy.
-4. Report mean, std, and percentiles (P50–P99.5) of the claim frequency distribution.
-
-#### v2 — Multi-year simulation (5 years)
-
-1. Load `data/portfolio_v2.csv` (10 K policies with claim history seed).
-2. For each of 10,000 simulations (in parallel, one ONNX session per Rayon worker thread):
-   - **Year t=0..4:** build feature matrix with current `VehAge`, `DrivAge`, `PriorClaims3Y`
-     → ONNX inference → draw `Poisson(λ)` per policy → shift rolling 3-year claim window
-     → increment `VehAge` and `DrivAge` by 1.
-3. Report per-year mean claims, mean frequency, P50, P95, P99.
-
-The key architectural point: from year 1 onward each simulation has a distinct
-`PriorClaims3Y` (because the Poisson draws differ), so ONNX must be called
-once per year per simulation. Each Rayon worker thread owns one ONNX session to avoid
-lock contention — zero serialisation overhead across cores.
-
-### Run
+## Running the Rust engine directly
 
 ```bash
 cd rust
-cargo run --release
+cargo run --release -- --n-sims 10000 --years 5 --fraction 1.0
 ```
 
-`--release` enables compiler optimisations — always use it for benchmarking.
-Without it the binary is 10–30× slower.
+**Always use `--release`** — the debug build is 10–30× slower.
 
-### Unit tests
+CLI options:
 
-```bash
-cd rust
-cargo test
-```
+| Flag | Default | Description |
+|---|---|---|
+| `--n-sims N` | 10000 | Number of Monte Carlo simulations |
+| `--years Y` | 5 | Projection horizon (1 = single-year, 5 = multi-year) |
+| `--fraction F` | 1.0 | Share of portfolio to use (0.0–1.0) |
 
 ---
 
-## Benchmark: Python vs Rust
+## Running the benchmark
+
+### Quick test (local, < 1 minute)
 
 ```bash
-# Python baseline
+QUICK_TEST=1 python python/benchmark.py
+```
+
+Uses a tiny grid to validate the full pipeline before committing to a long run.
+
+### Full benchmark
+
+```bash
+# Build Rust engine first (one-time, ~30–60 s after source changes)
+cd rust && cargo build --release && cd ..
+
 python python/benchmark.py
-
-# Rust (all cores)
-cd rust && cargo run --release
 ```
 
-The Python baseline uses `multiprocessing` to be a fair comparison. The Rust engine
-parallelises with Rayon. Both run the same workload.
+Results are saved to `results/benchmark_results.csv`. The `n_cores` column lets you
+stack results from multiple machines for cross-instance comparison.
 
-| Simulation | Engine | Parallelism | Workload |
-|---|---|---|---|
-| v1 single-year | Python | multiprocessing | ONNX once + 10K × 678K Poisson draws |
-| v1 single-year | Rust | Rayon | ONNX once + 10K × 678K Poisson draws |
-| v2 multi-year | Python | multiprocessing (1 ONNX session/worker) | 10K × 5 ONNX calls + 10K × 5 × 10K Poisson draws |
-| v2 multi-year | Rust | Rayon (1 ONNX session/thread) | 10K × 5 ONNX calls + 10K × 5 × 10K Poisson draws |
+See [BENCHMARK.md](BENCHMARK.md) for the full study design and runtime estimates.
+Hardware summary:
 
-The v1 speedup comes from two sources:
-1. **Parallelism** — Rayon distributes simulations across all cores with a one-line change.
-2. **Compiled code** — the Poisson sampling loop compiles to native machine code with no
-   interpreter overhead.
-
-The v2 speedup additionally demonstrates that even when ONNX must be called repeatedly
-(once per year per simulation), Rust's per-thread session design eliminates contention
-and keeps all cores busy.
+| Machine | Cores | Estimated full runtime |
+|---|---|---|
+| Intel MacBook (4 cores) | 4 | ~75 min |
+| AWS c5.4xlarge | 16 | ~20 min |
+| AWS c5.18xlarge | 72 | ~5 min |
+| AWS c5.metal | 96 | ~4 min |

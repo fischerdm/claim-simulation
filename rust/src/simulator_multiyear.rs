@@ -7,20 +7,17 @@ use rand_distr::{Distribution, Poisson};
 use rayon::prelude::*;
 
 use crate::model::FrequencyModel;
-use crate::portfolio::PolicyMultiYear;
-
-/// Number of projection years.
-pub const N_YEARS: usize = 5;
+use crate::portfolio::Policy;
 
 /// Per-year aggregate result for one simulation run.
 pub struct YearResult {
     pub total_claims: u64,
-    pub frequency:    f64, // total_claims / n_policies (exposure = 1.0 per year)
+    pub frequency:    f64, // total_claims / n_policies
 }
 
 /// Run one complete multi-year simulation for a single seed.
 ///
-/// The simulation loop for years t = 0 … N_YEARS-1:
+/// The simulation loop for years t = 0 … n_years-1:
 ///   1. Build the feature matrix using the current VehAge, DrivAge, PriorClaims3Y.
 ///   2. Call ONNX once (batch over all policies) → λ per policy.
 ///   3. Draw Poisson(λ × exposure) per policy.
@@ -28,25 +25,25 @@ pub struct YearResult {
 ///   5. Increment VehAge and DrivAge by 1.
 ///
 /// Exposure at t=0 uses the value from the portfolio (fraction of year active).
-/// For t=1..N_YEARS-1 exposure = 1.0 (full renewal years).
-fn run_one(model: &mut FrequencyModel, policies: &[PolicyMultiYear], seed: u64) -> [YearResult; N_YEARS] {
+/// For t=1..n_years-1 exposure = 1.0 (full renewal years).
+fn run_one(
+    model:   &mut FrequencyModel,
+    policies: &[Policy],
+    seed:     u64,
+    n_years:  usize,
+) -> Vec<YearResult> {
     let n = policies.len();
     let mut rng = SmallRng::seed_from_u64(seed);
 
     // Per-policy mutable state — cloned from the portfolio at the start of each sim.
-    let mut veh_age:      Vec<f32>     = policies.iter().map(|p| p.veh_age).collect();
-    let mut driv_age:     Vec<f32>     = policies.iter().map(|p| p.driv_age).collect();
+    let mut veh_age:      Vec<f32>      = policies.iter().map(|p| p.veh_age).collect();
+    let mut driv_age:     Vec<f32>      = policies.iter().map(|p| p.driv_age).collect();
     // Rolling 3-year window: [oldest (t-3), t-2, newest (t-1)]
     let mut claim_window: Vec<[u32; 3]> = policies.iter().map(|p| p.claims_hist).collect();
 
-    // Pre-allocate the result array. MaybeUninit would avoid the dummy values but
-    // this is cleaner — we overwrite every element in the loop below.
-    let mut results: [YearResult; N_YEARS] = std::array::from_fn(|_| YearResult {
-        total_claims: 0,
-        frequency:    0.0,
-    });
+    let mut results = Vec::with_capacity(n_years);
 
-    for year in 0..N_YEARS {
+    for year in 0..n_years {
         // Build the [n × 9] feature matrix for this projection year.
         let flat: Vec<f32> = (0..n)
             .flat_map(|i| {
@@ -60,7 +57,7 @@ fn run_one(model: &mut FrequencyModel, policies: &[PolicyMultiYear], seed: u64) 
         // One ONNX call batching all policies → λ per policy (annual frequency).
         let lambdas = model
             .run_inference(flat, n, 9)
-            .expect("ONNX inference failed in multi-year simulation");
+            .expect("ONNX inference failed");
 
         // Draw Poisson(λ × exposure) for each policy.
         // At year 0 we honour the original exposure (partial year).
@@ -76,11 +73,10 @@ fn run_one(model: &mut FrequencyModel, policies: &[PolicyMultiYear], seed: u64) 
             claim_window[i] = [claim_window[i][1], claim_window[i][2], claims];
         }
 
-        // Frequency relative to the portfolio size (all policies active = n).
-        results[year] = YearResult {
+        results.push(YearResult {
             total_claims,
             frequency: total_claims as f64 / n as f64,
-        };
+        });
 
         // Age vehicles and drivers for the next projection year.
         for i in 0..n {
@@ -106,9 +102,10 @@ fn run_one(model: &mut FrequencyModel, policies: &[PolicyMultiYear], seed: u64) 
 /// is zero lock contention — the Mutex is just a safe way to hold &mut access.
 pub fn run_parallel(
     model_path: &Path,
-    policies:   &[PolicyMultiYear],
+    policies:   &[Policy],
     n_sims:     usize,
-) -> Vec<[YearResult; N_YEARS]> {
+    n_years:    usize,
+) -> Vec<Vec<YearResult>> {
     let n_threads = rayon::current_num_threads();
 
     // Load one FrequencyModel per Rayon worker thread.
@@ -116,7 +113,7 @@ pub fn run_parallel(
         .map(|_| {
             Mutex::new(
                 FrequencyModel::load(model_path)
-                    .expect("failed to load v2 ONNX model for thread"),
+                    .expect("failed to load ONNX model for thread"),
             )
         })
         .collect();
@@ -126,18 +123,20 @@ pub fn run_parallel(
         .map(|sim_i| {
             let idx   = rayon::current_thread_index().unwrap_or(0);
             let mut m = models[idx].lock().unwrap();
-            run_one(&mut m, policies, sim_i as u64)
+            run_one(&mut m, policies, sim_i as u64, n_years)
         })
         .collect()
 }
 
 /// Print per-year summary statistics across all simulations.
-pub fn print_stats(results: &[[YearResult; N_YEARS]], n_policies: usize) {
+pub fn print_stats(results: &[Vec<YearResult>], n_policies: usize) {
+    let n_years = results[0].len();
+
     println!();
     println!(
         "=== Multi-Year Claim Simulation ({} sims × {} years × {} policies) ===",
         results.len(),
-        N_YEARS,
+        n_years,
         n_policies,
     );
     println!();
@@ -147,7 +146,7 @@ pub fn print_stats(results: &[[YearResult; N_YEARS]], n_policies: usize) {
     );
     println!("{}", "-".repeat(62));
 
-    for year in 0..N_YEARS {
+    for year in 0..n_years {
         let mut freqs: Vec<f64> = results.iter().map(|r| r[year].frequency).collect();
         let mean_claims =
             results.iter().map(|r| r[year].total_claims as f64).sum::<f64>() / results.len() as f64;

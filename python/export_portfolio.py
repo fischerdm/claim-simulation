@@ -5,7 +5,7 @@ Preprocesses freMTPL2freq and exports portfolio CSVs for the Rust simulation eng
 
 Exports two portfolios in one run:
   v1 — data/portfolio.csv      full dataset, includes bonus_malus
-  v2 — data/portfolio_v2.csv   10K sampled policies, includes claims history seed
+  v2 — data/portfolio_v2.csv   full dataset, includes claims history seed
 
 The Rust engine reads float32 values directly and does not do label encoding.
 This script applies the same preprocessing as train.py (clipping, label encoding
@@ -40,11 +40,6 @@ BASE_DIR = Path(__file__).parent.parent
 
 CATEGORICAL_FEATURES = ["Area", "VehBrand", "VehGas", "Region"]
 EXPOSURE             = "Exposure"
-
-# Number of policies to sample for the v2 multi-year simulation.
-# 10K policies × 10K sims × 5 years is comfortably tractable in Rust.
-N_PORTFOLIO_V2 = 10_000
-RANDOM_STATE   = 42
 
 
 def apply_preprocessing(df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
@@ -85,12 +80,8 @@ def export_v1(df: pd.DataFrame) -> None:
 
 
 def export_v2(df: pd.DataFrame) -> None:
-    """Export a sampled portfolio with claim history for the v2 multi-year simulation."""
+    """Export the full portfolio with claim history for the v2 multi-year simulation."""
     out_path = BASE_DIR / "data" / "portfolio_v2.csv"
-
-    if N_PORTFOLIO_V2 and len(df) > N_PORTFOLIO_V2:
-        df = df.sample(n=N_PORTFOLIO_V2, random_state=RANDOM_STATE).reset_index(drop=True)
-        logger.info("v2 portfolio: sampled %d policies from full dataset", len(df))
 
     out = pd.DataFrame({
         "veh_power":     df["VehPower"].astype(float),
