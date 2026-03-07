@@ -1,28 +1,19 @@
 """
 benchmark.py
 ------------
-Runs the single-year (v1) and multi-year (v2) Monte Carlo claim simulations in
-Python and Rust and prints a side-by-side timing comparison.
+Two benchmark studies using the v2 frequency model (PriorClaims3Y feature).
 
-Python simulation: ONNX inference + multiprocessing Poisson loop.
-Rust simulation:   same ONNX inference + parallel Rayon Poisson loop.
+Study 1 — Inference (no simulation):
+  Compare LightGBM native predict() vs ONNX Runtime for batch inference.
+  Scaling: portfolio fraction ∈ {25%, 50%, 100%} of portfolio_v2.csv.
+  Question: is ONNX Runtime faster than LightGBM for batch inference?
 
-Using multiprocessing on the Python side is the fair comparison: both engines
-use all available CPU cores. The remaining difference is purely the cost of
-the Poisson sampling loop itself (Python/NumPy vs compiled Rust).
+Study 2 — Simulation (Rust + ONNX engine):
+  Single-year (n_years=1) and multi-year (n_years=5).
+  Scaling grid: portfolio fraction × n_sims (3 × 3 = 9 cells per horizon).
+  Question: how does throughput scale with portfolio size and simulation count?
 
-v1 — Single-year:
-  Architecture: `mus` (678 K floats) is sent once to each worker process via
-  the Pool initializer — not once per simulation — so pickling overhead is
-  negligible. Each worker then runs its assigned chunk of simulations
-  sequentially, drawing Poisson(mu) for every policy and summing.
-
-v2 — Multi-year (5 years):
-  Each worker process owns one ONNX session (created in the initializer).
-  For each simulation the worker runs a 5-year loop: rebuild the feature
-  matrix with updated VehAge, DrivAge, PriorClaims3Y → ONNX inference →
-  Poisson draw → shift the rolling 3-year claim window → age policies.
-  This mirrors the Rust per-thread ONNX session design.
+Results are saved to results/benchmark_results.csv.
 
 Usage:
     python python/benchmark.py
@@ -35,9 +26,9 @@ import os
 import re
 import subprocess
 import time
-from multiprocessing import Pool
 from pathlib import Path
 
+import lightgbm as lgb
 import numpy as np
 import onnxruntime as rt
 import pandas as pd
@@ -45,346 +36,267 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-PORTFOLIO_PATH    = Path(__file__).parent.parent / "data" / "portfolio.csv"
-PORTFOLIO_PATH_V2 = Path(__file__).parent.parent / "data" / "portfolio_v2.csv"
-ONNX_PATH         = Path(__file__).parent.parent / "models" / "frequency_model.onnx"
-ONNX_PATH_V2      = Path(__file__).parent.parent / "models" / "frequency_model_v2.onnx"
-RUST_DIR          = Path(__file__).parent.parent / "rust"
+BASE_DIR       = Path(__file__).parent.parent
+PORTFOLIO_PATH = BASE_DIR / "data"   / "portfolio_v2.csv"
+ONNX_PATH      = BASE_DIR / "models" / "frequency_model_v2.onnx"
+LGB_PATH       = BASE_DIR / "models" / "frequency_model_v2.lgb"
+RESULTS_DIR    = BASE_DIR / "results"
+RUST_DIR       = BASE_DIR / "rust"
+RUST_BINARY    = RUST_DIR / "target" / "release" / "claim-simulation"
 
-FEATURE_COLS = [
-    "veh_power", "veh_age", "driv_age", "bonus_malus", "density",
-    "area", "veh_brand", "veh_gas", "region",
-]
+# Scaling grids
+FRACTIONS   = [0.25, 0.50, 1.0]
+N_SIMS_GRID = [2_000, 5_000, 10_000]
+N_YEARS_GRID = [1, 5]
 
-# v2 static features (veh_age / driv_age change each year and are tracked separately)
-FEATURE_COLS_V2_STATIC = ["veh_power", "density", "area", "veh_brand", "veh_gas", "region"]
-
-N_SIMS    = 10_000
-N_SIMS_V2 = 10_000
-N_YEARS   = 5
-N_WORKERS = os.cpu_count() or 4
+# Repetitions for inference timing — take the minimum to suppress OS jitter.
+N_REPS = 3
 
 
 # ---------------------------------------------------------------------------
-# Portfolio + ONNX loading
+# Portfolio loading
 # ---------------------------------------------------------------------------
 
 def load_portfolio() -> tuple[np.ndarray, np.ndarray]:
-    """Returns (features float32 [N, 9], exposure float64 [N])."""
+    """
+    Load portfolio_v2.csv and build the [N, 9] feature matrix in model
+    training order (matches train.py V2 ALL_FEATURES):
+
+        [VehPower, VehAge, DrivAge, Density, PriorClaims3Y,
+         Area, VehBrand, VehGas, Region]
+
+    PriorClaims3Y is the sum of the three claims-history columns.
+
+    Returns (features float32 [N, 9], exposure float64 [N]).
+    """
     df       = pd.read_csv(PORTFOLIO_PATH)
-    features = df[FEATURE_COLS].values.astype(np.float32)
+    prior_3y = (
+        df["claims_hist_1"] + df["claims_hist_2"] + df["claims_hist_3"]
+    ).values.astype(np.float32)
+
+    features = np.column_stack([
+        df["veh_power"].values,   # 0: VehPower
+        df["veh_age"].values,     # 1: VehAge
+        df["driv_age"].values,    # 2: DrivAge
+        df["density"].values,     # 3: Density
+        prior_3y,                 # 4: PriorClaims3Y
+        df["area"].values,        # 5: Area
+        df["veh_brand"].values,   # 6: VehBrand
+        df["veh_gas"].values,     # 7: VehGas
+        df["region"].values,      # 8: Region
+    ]).astype(np.float32)
+
     exposure = df["exposure"].values.astype(np.float64)
     return features, exposure
 
 
-def compute_mus(features: np.ndarray, exposure: np.ndarray) -> np.ndarray:
-    """Run ONNX inference; return μ = λ × exposure per policy."""
+# ---------------------------------------------------------------------------
+# Study 1: Inference benchmark
+# ---------------------------------------------------------------------------
+
+def run_inference_benchmark(features: np.ndarray) -> pd.DataFrame:
+    """
+    Time LightGBM predict() vs ONNX Runtime on portfolio subsets.
+
+    Each measurement is the minimum of N_REPS runs to suppress OS scheduling
+    jitter. A warmup call is made before timing to ensure lazy initialisation
+    costs (JIT, library loading) are excluded from the measurement.
+
+    Returns a DataFrame with one row per (engine, fraction).
+    """
+    logger.info("Loading LightGBM model (%s) ...", LGB_PATH)
+    booster = lgb.Booster(model_file=str(LGB_PATH))
+
+    logger.info("Loading ONNX session (%s) ...", ONNX_PATH)
     sess        = rt.InferenceSession(str(ONNX_PATH), providers=["CPUExecutionProvider"])
     input_name  = sess.get_inputs()[0].name
     output_name = sess.get_outputs()[0].name
-    lambdas     = sess.run([output_name], {input_name: features})[0].flatten().astype(np.float64)
-    return lambdas * exposure
 
+    # Warmup — exclude lazy-init costs from measurements.
+    _ = booster.predict(features[:10])
+    _ = sess.run([output_name], {input_name: features[:10]})
 
-def load_portfolio_v2() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Returns:
-        static_features: float32 [N, 6] — veh_power, density, area, veh_brand, veh_gas, region
-        veh_age_init:    float32 [N]
-        driv_age_init:   float32 [N]
-        exposure:        float64 [N]
-        claims_hist:     int32   [N, 3]
-    """
-    df              = pd.read_csv(PORTFOLIO_PATH_V2)
-    static_features = df[FEATURE_COLS_V2_STATIC].values.astype(np.float32)
-    veh_age_init    = df["veh_age"].values.astype(np.float32)
-    driv_age_init   = df["driv_age"].values.astype(np.float32)
-    exposure        = df["exposure"].values.astype(np.float64)
-    claims_hist     = df[["claims_hist_1", "claims_hist_2", "claims_hist_3"]].values.astype(np.int32)
-    return static_features, veh_age_init, driv_age_init, exposure, claims_hist
+    n_total = len(features)
+    rows: list[dict] = []
 
+    for fraction in FRACTIONS:
+        n        = max(1, round(fraction * n_total))
+        feat_sub = features[:n]
 
-# ---------------------------------------------------------------------------
-# Python v1 simulation — multiprocessing
-# ---------------------------------------------------------------------------
-
-# Module-level state shared across worker processes (set via initializer).
-_worker_mus:            np.ndarray | None = None
-_worker_total_exposure: float | None      = None
-
-
-def _worker_init(mus: np.ndarray, total_exposure: float) -> None:
-    """Called once per worker process to install shared read-only state."""
-    global _worker_mus, _worker_total_exposure
-    _worker_mus            = mus
-    _worker_total_exposure = total_exposure
-
-
-def _simulate_chunk(seeds: list[int]) -> list[float]:
-    """
-    Run one simulation per seed in this chunk.
-    Each simulation draws Poisson(mu) for every policy (vectorised) and sums.
-    Returns claim frequencies (total_claims / total_exposure).
-    """
-    results = []
-    for seed in seeds:
-        rng = np.random.default_rng(seed)
-        results.append(rng.poisson(_worker_mus).sum() / _worker_total_exposure)
-    return results
-
-
-def simulate_parallel(mus: np.ndarray, total_exposure: float, n_sims: int) -> np.ndarray:
-    """Distribute n_sims simulations across N_WORKERS processes."""
-    seeds      = list(range(n_sims))
-    chunk_size = max(1, (n_sims + N_WORKERS - 1) // N_WORKERS)
-    chunks     = [seeds[i : i + chunk_size] for i in range(0, n_sims, chunk_size)]
-
-    with Pool(
-        processes=N_WORKERS,
-        initializer=_worker_init,
-        initargs=(mus, total_exposure),
-    ) as pool:
-        nested = pool.map(_simulate_chunk, chunks)
-
-    return np.array([freq for chunk in nested for freq in chunk])
-
-
-# ---------------------------------------------------------------------------
-# Python v2 simulation — multiprocessing, one ONNX session per worker
-# ---------------------------------------------------------------------------
-
-# Worker state for v2 (set via initializer).
-_worker_v2_static:      np.ndarray | None          = None  # [N, 6]
-_worker_v2_veh_age:     np.ndarray | None          = None  # [N]
-_worker_v2_driv_age:    np.ndarray | None          = None  # [N]
-_worker_v2_exposure:    np.ndarray | None          = None  # [N]
-_worker_v2_claims_hist: np.ndarray | None          = None  # [N, 3]
-_worker_v2_sess:        rt.InferenceSession | None = None
-_worker_v2_input_name:  str | None                 = None
-_worker_v2_output_name: str | None                 = None
-
-
-def _worker_v2_init(
-    static_features: np.ndarray,
-    veh_age_init:    np.ndarray,
-    driv_age_init:   np.ndarray,
-    exposure:        np.ndarray,
-    claims_hist:     np.ndarray,
-    onnx_path:       Path,
-) -> None:
-    """Called once per worker: installs shared data and creates a local ONNX session."""
-    global _worker_v2_static, _worker_v2_veh_age, _worker_v2_driv_age
-    global _worker_v2_exposure, _worker_v2_claims_hist
-    global _worker_v2_sess, _worker_v2_input_name, _worker_v2_output_name
-    _worker_v2_static      = static_features
-    _worker_v2_veh_age     = veh_age_init
-    _worker_v2_driv_age    = driv_age_init
-    _worker_v2_exposure    = exposure
-    _worker_v2_claims_hist = claims_hist
-    _worker_v2_sess        = rt.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-    _worker_v2_input_name  = _worker_v2_sess.get_inputs()[0].name
-    _worker_v2_output_name = _worker_v2_sess.get_outputs()[0].name
-
-
-def _simulate_v2_chunk(seeds: list[int]) -> list[list[float]]:
-    """
-    Run one 5-year simulation per seed.
-
-    Feature order sent to ONNX (matches train.py ALL_FEATURES for V2):
-        [VehPower, VehAge, DrivAge, Density, PriorClaims3Y, Area, VehBrand, VehGas, Region]
-
-    static_features columns:
-        0: veh_power  1: density  2: area  3: veh_brand  4: veh_gas  5: region
-
-    Returns a list of [year_0_freq, ..., year_4_freq] per simulation.
-    """
-    results = []
-    n       = len(_worker_v2_static)
-
-    for seed in seeds:
-        rng = np.random.default_rng(seed)
-
-        # Clone mutable simulation state.
-        veh_age  = _worker_v2_veh_age.copy()
-        driv_age = _worker_v2_driv_age.copy()
-        hist     = _worker_v2_claims_hist.copy()  # [N, 3]: [oldest t-3, t-2, newest t-1]
-
-        sim_freqs: list[float] = []
-        for year in range(N_YEARS):
-            prior_3y = hist.sum(axis=1).astype(np.float32)  # [N]
-
-            # Build [N, 9] feature matrix.
-            # Column order must match ALL_FEATURES in train.py (V2):
-            #   [VehPower, VehAge, DrivAge, Density, PriorClaims3Y, Area, VehBrand, VehGas, Region]
-            features = np.column_stack([
-                _worker_v2_static[:, 0],  # veh_power
-                veh_age,
-                driv_age,
-                _worker_v2_static[:, 1],  # density
-                prior_3y,                 # prior_claims_3y
-                _worker_v2_static[:, 2],  # area
-                _worker_v2_static[:, 3],  # veh_brand
-                _worker_v2_static[:, 4],  # veh_gas
-                _worker_v2_static[:, 5],  # region
-            ]).astype(np.float32)
-
-            lambdas = _worker_v2_sess.run(
-                [_worker_v2_output_name], {_worker_v2_input_name: features}
-            )[0].flatten().astype(np.float64)
-
-            # Exposure: portfolio value at t=0, full year (1.0) thereafter.
-            exposure = _worker_v2_exposure if year == 0 else np.ones(n, dtype=np.float64)
-            claims   = rng.poisson(lambdas * exposure).astype(np.int32)
-
-            # Shift rolling window: drop oldest, append this year's draw.
-            hist = np.column_stack([hist[:, 1], hist[:, 2], claims])
-
-            sim_freqs.append(float(claims.sum()) / n)
-
-            veh_age  += 1.0
-            driv_age += 1.0
-
-        results.append(sim_freqs)
-
-    return results
-
-
-def simulate_v2_parallel(
-    static_features: np.ndarray,
-    veh_age_init:    np.ndarray,
-    driv_age_init:   np.ndarray,
-    exposure:        np.ndarray,
-    claims_hist:     np.ndarray,
-    n_sims:          int,
-) -> np.ndarray:
-    """
-    Distribute n_sims v2 simulations across N_WORKERS processes.
-    Returns an [n_sims, N_YEARS] array of per-year claim frequencies.
-    """
-    seeds      = list(range(n_sims))
-    chunk_size = max(1, (n_sims + N_WORKERS - 1) // N_WORKERS)
-    chunks     = [seeds[i : i + chunk_size] for i in range(0, n_sims, chunk_size)]
-
-    with Pool(
-        processes=N_WORKERS,
-        initializer=_worker_v2_init,
-        initargs=(static_features, veh_age_init, driv_age_init, exposure, claims_hist, ONNX_PATH_V2),
-    ) as pool:
-        nested = pool.map(_simulate_v2_chunk, chunks)
-
-    all_sims = [sim for chunk in nested for sim in chunk]
-    return np.array(all_sims)  # [n_sims, N_YEARS]
-
-
-# ---------------------------------------------------------------------------
-# Statistics
-# ---------------------------------------------------------------------------
-
-def print_stats(label: str, frequencies: np.ndarray, total_exposure: float, n_sims: int) -> None:
-    mean_claims = frequencies.mean() * total_exposure
-    print(f"=== {label} — Simulation Results ({n_sims:,} simulations) ===")
-    print(f"Portfolio exposure: {total_exposure:.2f} policy-years")
-    print(f"Expected claims per simulation:  {mean_claims:.2f}")
-    print("Claim frequency (claims / policy-year):")
-    print(f"  Mean:   {frequencies.mean():.5f}")
-    print(f"  Std:    {frequencies.std():.5f}")
-    print(f"  P50:    {np.percentile(frequencies, 50):.5f}")
-    print(f"  P75:    {np.percentile(frequencies, 75):.5f}")
-    print(f"  P95:    {np.percentile(frequencies, 95):.5f}")
-    print(f"  P99:    {np.percentile(frequencies, 99):.5f}")
-    print(f"  P99.5:  {np.percentile(frequencies, 99.5):.5f}")
-    print()
-
-
-def print_stats_v2(
-    label:           str,
-    year_frequencies: np.ndarray,
-    n_policies:      int,
-    n_sims:          int,
-) -> None:
-    """year_frequencies: [n_sims, N_YEARS] array of per-year claim frequencies."""
-    print(
-        f"=== {label} — Multi-Year Simulation Results "
-        f"({n_sims:,} sims × {N_YEARS} years × {n_policies:,} policies) ==="
-    )
-    print(
-        f"{'Year':<6}  {'Mean claims':>12}  {'Mean freq':>10}  "
-        f"{'P50':>10}  {'P95':>10}  {'P99':>10}"
-    )
-    print("-" * 64)
-    for year in range(N_YEARS):
-        freqs       = year_frequencies[:, year]
-        mean_claims = freqs.mean() * n_policies
-        print(
-            f"t={year:<4}  {mean_claims:>12.1f}  {freqs.mean():>10.5f}  "
-            f"{np.percentile(freqs, 50):>10.5f}  {np.percentile(freqs, 95):>10.5f}  "
-            f"{np.percentile(freqs, 99):>10.5f}"
+        lgb_elapsed  = min(
+            _time_call(lambda: booster.predict(feat_sub))
+            for _ in range(N_REPS)
         )
-    print()
+        onnx_elapsed = min(
+            _time_call(lambda: sess.run([output_name], {input_name: feat_sub}))
+            for _ in range(N_REPS)
+        )
+        speedup = lgb_elapsed / onnx_elapsed if onnx_elapsed > 0 else float("nan")
+
+        logger.info(
+            "Inference  n=%6d  lgb=%.1f ms  onnx=%.1f ms  speedup=%.2f×",
+            n, lgb_elapsed * 1e3, onnx_elapsed * 1e3, speedup,
+        )
+
+        for engine, elapsed in [("lgb", lgb_elapsed), ("onnx", onnx_elapsed)]:
+            rows.append({
+                "engine":       engine,
+                "fraction":     fraction,
+                "n_policies":   n,
+                "elapsed_s":    elapsed,
+                "ms_per_call":  elapsed * 1e3,
+                "onnx_speedup": speedup if engine == "onnx" else 1.0,
+            })
+
+    return pd.DataFrame(rows)
+
+
+def _time_call(fn) -> float:
+    t0 = time.perf_counter()
+    fn()
+    return time.perf_counter() - t0
 
 
 # ---------------------------------------------------------------------------
-# Rust simulation (via pre-built binary)
+# Study 2: Simulation benchmark (Rust + ONNX)
 # ---------------------------------------------------------------------------
-
-RUST_BINARY = RUST_DIR / "target" / "release" / "claim-simulation"
-
 
 def build_rust() -> bool:
-    """
-    Compile the Rust engine with `cargo build --release`.
-    Build output streams to the terminal so the user can see progress.
-    Returns True on success.
-    """
     logger.info("Building Rust engine (cargo build --release) ...")
-    result = subprocess.run(
-        ["cargo", "build", "--release"],
-        cwd=RUST_DIR,
-    )
+    result = subprocess.run(["cargo", "build", "--release"], cwd=RUST_DIR)
     if result.returncode != 0:
-        logger.warning("Rust build failed (exit %d).", result.returncode)
+        logger.error("Rust build failed.")
         return False
-    logger.info("Build complete.")
+    logger.info("Rust build complete.")
     return True
 
 
-def run_rust() -> tuple[float | None, float | None]:
-    """
-    Run the pre-built Rust binary and return (v1_elapsed_s, v2_elapsed_s).
-
-    Separating build from run is essential for a fair benchmark: compilation
-    time is irrelevant to simulation throughput and can take 30-60 s after
-    source changes, completely swamping the actual simulation time.
-    """
-    if not RUST_BINARY.exists():
-        logger.info("Binary not found — building first.")
-        if not build_rust():
-            return None, None
-
-    logger.info("Running Rust binary (%s) ...", RUST_BINARY)
+def run_rust_cell(fraction: float, n_sims: int, n_years: int) -> dict | None:
+    """Run the Rust binary for one (fraction, n_sims, n_years) cell."""
     result = subprocess.run(
-        [str(RUST_BINARY)],
+        [
+            str(RUST_BINARY),
+            "--fraction", str(fraction),
+            "--n-sims",   str(n_sims),
+            "--years",    str(n_years),
+        ],
         cwd=RUST_DIR,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
-
     if result.returncode != 0:
-        logger.warning("Rust binary failed (exit %d):\n%s", result.returncode, result.stderr)
-        return None, None
+        logger.warning("Rust binary failed:\n%s", result.stderr[:300])
+        return None
 
-    print(result.stdout)
+    # "Portfolio: N/M policies ..."
+    m_pol  = re.search(r"Portfolio:\s+(\d+)/\d+", result.stdout)
+    # "Done in X.XXXs  (Y.Y ms/simulation)"
+    m_time = re.search(r"\(([\d.]+) ms/simulation\)", result.stdout)
 
-    # Parse v1: "Done in X.XXs  (Y.Y µs/simulation)"
-    m1 = re.search(r"\(([\d.]+) µs/simulation\)", result.stdout)
-    # Parse v2: "Done in X.XXXs  (Y.Y ms/simulation)"
-    m2 = re.search(r"\(([\d.]+) ms/simulation\)", result.stdout)
+    if not m_pol or not m_time:
+        logger.warning("Could not parse Rust output:\n%s", result.stdout[:400])
+        return None
 
-    rust_v1 = float(m1.group(1)) * N_SIMS    / 1e6 if m1 else None
-    rust_v2 = float(m2.group(1)) * N_SIMS_V2 / 1e3 if m2 else None
+    ms_per_sim = float(m_time.group(1))
+    return {
+        "fraction":   fraction,
+        "n_policies": int(m_pol.group(1)),
+        "n_sims":     n_sims,
+        "n_years":    n_years,
+        "elapsed_s":  ms_per_sim * n_sims / 1e3,
+        "ms_per_sim": ms_per_sim,
+        "engine":     "rust_onnx",
+    }
 
-    return rust_v1, rust_v2
+
+def run_simulation_benchmark() -> pd.DataFrame:
+    """Drive the Rust engine across all (n_years, n_sims, fraction) combinations."""
+    if not RUST_BINARY.exists():
+        logger.info("Binary not found — building first.")
+        if not build_rust():
+            return pd.DataFrame()
+
+    total = len(N_YEARS_GRID) * len(N_SIMS_GRID) * len(FRACTIONS)
+    done  = 0
+    rows: list[dict] = []
+
+    for n_years in N_YEARS_GRID:
+        for n_sims in N_SIMS_GRID:
+            for fraction in FRACTIONS:
+                done += 1
+                logger.info(
+                    "[%d/%d] Rust  years=%d  n_sims=%5d  fraction=%.0f%%",
+                    done, total, n_years, n_sims, fraction * 100,
+                )
+                row = run_rust_cell(fraction, n_sims, n_years)
+                if row is not None:
+                    rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Output tables
+# ---------------------------------------------------------------------------
+
+def print_inference_table(df: pd.DataFrame) -> None:
+    W = 62
+    print()
+    print("=" * W)
+    print("  Study 1 — Inference: LightGBM vs ONNX Runtime")
+    print("=" * W)
+    print(f"  {'Policies':>8}  {'Fraction':>8}  {'LightGBM':>10}  {'ONNX RT':>10}  {'Speedup':>8}")
+    print(f"  {'-'*8}  {'-'*8}  {'-'*10}  {'-'*10}  {'-'*8}")
+
+    for n_policies in sorted(df["n_policies"].unique()):
+        sub      = df[df["n_policies"] == n_policies]
+        lgb_row  = sub[sub["engine"] == "lgb"].iloc[0]
+        onnx_row = sub[sub["engine"] == "onnx"].iloc[0]
+        print(
+            f"  {n_policies:>8,}  {lgb_row['fraction']:>7.0%}  "
+            f"{lgb_row['ms_per_call']:>9.1f}ms  "
+            f"{onnx_row['ms_per_call']:>9.1f}ms  "
+            f"{onnx_row['onnx_speedup']:>7.2f}×"
+        )
+
+    print("=" * W)
+    print()
+
+
+def print_simulation_table(df: pd.DataFrame) -> None:
+    n_sims_vals = sorted(df["n_sims"].unique())
+    col_w = 12
+    W     = 22 + col_w * len(n_sims_vals)
+
+    print()
+    print("=" * W)
+    print("  Study 2 — Simulation: Rust + ONNX  (ms / simulation)")
+    print("=" * W)
+
+    for n_years in sorted(df["n_years"].unique()):
+        label = "Single-year (n_years=1)" if n_years == 1 else f"Multi-year  (n_years={n_years})"
+        sub   = df[df["n_years"] == n_years]
+
+        print(f"\n  {label}")
+        header = f"  {'Policies':>8}  {'Frac':>4}"
+        for ns in n_sims_vals:
+            header += f"  {f'{ns:,} sims':>{col_w}}"
+        print(header)
+        print(f"  {'-'*8}  {'-'*4}" + f"  {'-'*col_w}" * len(n_sims_vals))
+
+        for fraction in sorted(sub["fraction"].unique()):
+            frac_rows = sub[sub["fraction"] == fraction]
+            n_pol     = int(frac_rows["n_policies"].iloc[0])
+            line      = f"  {n_pol:>8,}  {fraction:>3.0%} "
+            for ns in n_sims_vals:
+                cell = frac_rows[frac_rows["n_sims"] == ns]
+                line += f"  {cell['ms_per_sim'].iloc[0]:>{col_w}.1f}" if len(cell) else f"  {'—':>{col_w}}"
+            print(line)
+
+    print()
+    print("=" * W)
+    print()
 
 
 # ---------------------------------------------------------------------------
@@ -394,110 +306,41 @@ def run_rust() -> tuple[float | None, float | None]:
 def main() -> None:
     if not PORTFOLIO_PATH.exists():
         raise FileNotFoundError(
-            f"Portfolio CSV not found at {PORTFOLIO_PATH}. "
+            f"Portfolio not found at {PORTFOLIO_PATH}. "
             "Run python/export_portfolio.py first."
         )
 
-    # ── v1: single-year ──────────────────────────────────────────────────────
-    logger.info("Loading v1 portfolio (%s) ...", PORTFOLIO_PATH)
-    features, exposure = load_portfolio()
-    total_exposure     = float(exposure.sum())
-    logger.info(
-        "Portfolio: %d policies, %.2f total policy-years",
-        len(features), total_exposure,
-    )
-
-    logger.info("Running ONNX inference (v1) ...")
-    mus = compute_mus(features, exposure)
-
-    logger.info("Running %d simulations (Python v1, %d workers) ...", N_SIMS, N_WORKERS)
-    t0           = time.perf_counter()
-    frequencies  = simulate_parallel(mus, total_exposure, N_SIMS)
-    py_v1_elapsed = time.perf_counter() - t0
-    logger.info(
-        "Python v1 done in %.2fs  (%.1f µs/simulation)",
-        py_v1_elapsed, py_v1_elapsed / N_SIMS * 1e6,
-    )
-
-    print()
-    print_stats("Python v1", frequencies, total_exposure, N_SIMS)
-
-    # ── v2: multi-year ───────────────────────────────────────────────────────
-    py_v2_elapsed: float | None = None
-    n_policies_v2               = 0
-
-    if PORTFOLIO_PATH_V2.exists() and ONNX_PATH_V2.exists():
-        logger.info("Loading v2 portfolio (%s) ...", PORTFOLIO_PATH_V2)
-        static_features, veh_age_init, driv_age_init, exposure_v2, claims_hist = load_portfolio_v2()
-        n_policies_v2 = len(static_features)
-        logger.info("v2 portfolio: %d policies", n_policies_v2)
-
-        logger.info(
-            "Running %d simulations (Python v2, %d workers, %d years) ...",
-            N_SIMS_V2, N_WORKERS, N_YEARS,
-        )
-        t0            = time.perf_counter()
-        year_freqs    = simulate_v2_parallel(
-            static_features, veh_age_init, driv_age_init, exposure_v2, claims_hist, N_SIMS_V2,
-        )
-        py_v2_elapsed = time.perf_counter() - t0
-        logger.info(
-            "Python v2 done in %.2fs  (%.1f ms/simulation)",
-            py_v2_elapsed, py_v2_elapsed / N_SIMS_V2 * 1e3,
-        )
-
-        print()
-        print_stats_v2("Python v2", year_freqs, n_policies_v2, N_SIMS_V2)
-    else:
-        logger.warning(
-            "v2 portfolio or ONNX model not found — skipping Python v2 benchmark. "
-            "Run python/export_portfolio.py first."
-        )
-
-    rust_v1_elapsed, rust_v2_elapsed = run_rust()
-
-    # ── Summary table ─────────────────────────────────────────────────────────
     n_cores = os.cpu_count() or "?"
-    W = 58
-    print("=" * W)
-    print("  Benchmark summary")
-    print("=" * W)
+    logger.info("Running on %s CPU cores", n_cores)
 
-    # v1
-    print(f"  v1 — Single-year  ({N_SIMS:,} sims, {len(features):,} policies)")
-    print(f"  {'Engine':<16}  {'Workers':>7}  {'Time':>8}  {'µs/sim':>8}")
-    print(f"  {'-'*16}  {'-'*7}  {'-'*8}  {'-'*8}")
-    print(
-        f"  {'Python':<16}  {N_WORKERS:>7}  "
-        f"{py_v1_elapsed:>7.2f}s  {py_v1_elapsed / N_SIMS * 1e6:>7.1f}"
-    )
-    if rust_v1_elapsed is not None:
-        print(
-            f"  {'Rust (Rayon)':<16}  {n_cores:>7}  "
-            f"{rust_v1_elapsed:>7.2f}s  {rust_v1_elapsed / N_SIMS * 1e6:>7.1f}"
-        )
-        print(f"  Speedup v1: {py_v1_elapsed / rust_v1_elapsed:.1f}×")
+    logger.info("Loading portfolio from %s ...", PORTFOLIO_PATH)
+    features, _exposure = load_portfolio()
+    logger.info("Portfolio: %d policies", len(features))
 
-    # v2
-    if py_v2_elapsed is not None or rust_v2_elapsed is not None:
-        print()
-        print(f"  v2 — Multi-year  ({N_SIMS_V2:,} sims × {N_YEARS} years, {n_policies_v2:,} policies)")
-        print(f"  {'Engine':<16}  {'Workers':>7}  {'Time':>8}  {'ms/sim':>8}")
-        print(f"  {'-'*16}  {'-'*7}  {'-'*8}  {'-'*8}")
-        if py_v2_elapsed is not None:
-            print(
-                f"  {'Python':<16}  {N_WORKERS:>7}  "
-                f"{py_v2_elapsed:>7.2f}s  {py_v2_elapsed / N_SIMS_V2 * 1e3:>7.1f}"
-            )
-        if rust_v2_elapsed is not None:
-            print(
-                f"  {'Rust (Rayon)':<16}  {n_cores:>7}  "
-                f"{rust_v2_elapsed:>7.2f}s  {rust_v2_elapsed / N_SIMS_V2 * 1e3:>7.1f}"
-            )
-        if py_v2_elapsed is not None and rust_v2_elapsed is not None:
-            print(f"  Speedup v2: {py_v2_elapsed / rust_v2_elapsed:.1f}×")
+    # Study 1 — Inference benchmark
+    logger.info("=== Study 1: Inference benchmark ===")
+    inference_df = run_inference_benchmark(features)
+    inference_df.insert(0, "study", "inference")
 
-    print("=" * W)
+    # Study 2 — Simulation benchmark
+    logger.info("=== Study 2: Simulation benchmark ===")
+    sim_df = run_simulation_benchmark()
+    if not sim_df.empty:
+        sim_df.insert(0, "study", "simulation")
+
+    # Save combined results
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    results_path = RESULTS_DIR / "benchmark_results.csv"
+    frames = [inference_df] + ([sim_df] if not sim_df.empty else [])
+    all_df = pd.concat(frames, ignore_index=True)
+    all_df["n_cores"] = n_cores
+    all_df.to_csv(results_path, index=False)
+    logger.info("Results saved to %s", results_path)
+
+    # Print summary tables
+    print_inference_table(inference_df)
+    if not sim_df.empty:
+        print_simulation_table(sim_df)
 
 
 if __name__ == "__main__":
