@@ -129,13 +129,14 @@ This matters in two ways:
 
    Optimal k ≈ √(n_sims × n_years × T_inference(N) / T_session)
 
-   For production workloads (678K policies, 2500 sims, 5 years):
-   - T_inference(678K) ≈ 200 ms / inference call
-   - T_session ≈ 25 s
-   - Optimal k ≈ √(2500 × 5 × 0.2 / 25) ≈ √100 = **10 threads**
-
-   Beyond ~10–16 cores, session loading time grows faster than compute time shrinks.
-   AWS cost efficiency peaks well before the largest available instances.
+   For production workloads (678K policies, 2500 sims, 5 years) — using AWS numbers
+   once the calibration run is complete (plug in your observed T_inference and T_session):
+   ```
+   k* ≈ √(2500 × 5 × T_inference(678K) / T_session)
+   ```
+   On macOS Intel (T_inference(10K)≈1 s → T_inference(678K)≈67 s, T_session≈24 s),
+   k* ≈ √(2500 × 5 × 67 / 24) ≈ 187 — but that machine is not a useful reference.
+   On a fast Linux box (T_inference likely 5–20× lower), k* will be 10–40 threads.
 
 ---
 
@@ -195,41 +196,43 @@ typically sufficient.
 
 ## Runtime estimates
 
-These are **order-of-magnitude** estimates built on two components:
-- T_inference ≈ 300 ns per policy per ONNX call (LightGBM ensemble, ~400 trees)
-- T_session ≈ 25 s per thread (sequential; Linux/AWS value unknown until measured)
+> **Status: AWS numbers TBD.** The table below will be filled in after the calibration
+> run on AWS (see *Calibration run* above). The macOS Intel numbers are observed; the
+> AWS columns are placeholders.
 
-### Per-simulation cost (compute only, excludes startup)
+### Observed: macOS Intel (calibration run, 2026-03-07)
 
-| Fraction | Policies | n_years=1 | n_years=5 |
-|---|---|---|---|
-| 25% | ~170K | ~50 ms | ~250 ms |
-| 50% | ~340K | ~100 ms | ~500 ms |
-| 100% | ~678K | ~200 ms | ~1,000 ms |
+| Run | Policies | n_sims | n_years | Cores | T_total | T_startup | T_compute | T_inference/call |
+|---|---|---|---|---|---|---|---|---|
+| Calibration | 10,000 | 500 | 5 | 8 | 502 s | ~195 s | ~307 s | ~1 s |
 
-### Wall-clock estimate — full benchmark, 2,500 sims × 5 years × 678K policies
+- **T_inference(10K policies) ≈ 1 s/call** on macOS Intel (100 µs/policy).
+  This is ~300× slower than the theoretical 300 ns/policy — consistent with an aging
+  Intel Mac without AVX-512 and with macOS memory bandwidth limitations. Modern Linux
+  instances (AVX-512, larger caches) should be substantially faster.
+- T_startup ≈ 24 s/session, loading sequentially due to ONNX Runtime global lock.
 
-The table below includes sequential session-loading overhead.
+> **Note on portfolio size:** `data/portfolio_v2.csv` contains **10,000 policies**
+> (a stratified sample). The full 678K-policy benchmark requires re-running
+> `python/export_portfolio.py` without a size cap to generate the full portfolio file.
 
-| Machine | Cores (k) | T_startup | T_compute | **T_total** | On-demand $/hr | **Est. cost** |
-|---|---|---|---|---|---|---|
-| Intel MacBook (dev) | 8 | 3 min | 45 min | **~48 min** | — | — |
-| AWS c6i.2xlarge | 8 | 3 min | 45 min | **~48 min** | $0.34 | **$0.27** |
-| AWS c6i.4xlarge | 16 | 7 min | 22 min | **~29 min** | $0.68 | **$0.33** |
-| AWS c6i.8xlarge | 32 | 13 min | 11 min | **~24 min** | $1.36 | **$0.54** |
-| AWS c6i.16xlarge | 64 | 27 min | 6 min | **~33 min** | $2.72 | **$1.50** |
-| AWS c6i.32xlarge | 128 | 53 min | 3 min | **~56 min** | $5.44 | **$5.08** |
+### Wall-clock estimates — 2,500 sims × 5 years × 678K policies
 
-**Key observation:** the c6i.4xlarge (16 cores, ~$0.33) offers the best cost-time
-balance for this workload. Beyond 16–32 cores, session loading overhead grows faster
-than compute time shrinks and cost efficiency degrades sharply.
+Numbers below use the formula `T_wall ≈ k × T_session + (N × n_sims × n_years) / (throughput × k)`.
+The throughput column is the key unknown; **fill in after the AWS calibration run**.
 
-> Spot instances reduce on-demand price by 60–70% for interruptible workloads.
-> The full benchmark (18 cells) runs in a single process invocation, so interruption
-> risk is low for runs under ~30 minutes.
+| Machine | Cores (k) | T_session | Throughput (policies/s/thread) | T_total (est.) | On-demand $/hr |
+|---|---|---|---|---|---|
+| Intel MacBook (dev) | 8 | ~24 s | ~10,000 | ~6 h | — |
+| AWS c6i.2xlarge | 8 | TBD | TBD | TBD | $0.34 |
+| AWS c6i.4xlarge | 16 | TBD | TBD | TBD | $0.68 |
+| AWS c6i.8xlarge | 32 | TBD | TBD | TBD | $1.36 |
+| AWS c6i.16xlarge | 64 | TBD | TBD | TBD | $2.72 |
 
-> These numbers will shift on Linux. Replace T_session with your observed value from
-> the calibration run above before making instance decisions.
+> Spot instances reduce on-demand price by ~70% for interruptible workloads.
+> The structural insight still holds: beyond the optimal thread count
+> (`k* ≈ √(n_sims × n_years × T_inference(N) / T_session)`), session loading grows
+> faster than compute shrinks — cost efficiency degrades sharply at high core counts.
 
 ---
 
