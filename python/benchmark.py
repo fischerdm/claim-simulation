@@ -44,13 +44,17 @@ RESULTS_DIR    = BASE_DIR / "results"
 RUST_DIR       = BASE_DIR / "rust"
 RUST_BINARY    = RUST_DIR / "target" / "release" / "claim-simulation"
 
+# Quick-test mode: QUICK_TEST=1 python python/benchmark.py
+# Uses a tiny grid to validate the full pipeline in < 1 minute.
+QUICK_TEST = os.getenv("QUICK_TEST", "").lower() in ("1", "true", "yes")
+
 # Scaling grids
-FRACTIONS   = [0.25, 0.50, 1.0]
-N_SIMS_GRID = [2_000, 5_000, 10_000]
+FRACTIONS    = [0.005, 0.01]        if QUICK_TEST else [0.25, 0.50, 1.0]
+N_SIMS_GRID  = [200, 500]           if QUICK_TEST else [2_000, 5_000, 10_000]
 N_YEARS_GRID = [1, 5]
 
 # Repetitions for inference timing — take the minimum to suppress OS jitter.
-N_REPS = 3
+N_REPS = 1 if QUICK_TEST else 3
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +308,9 @@ def print_simulation_table(df: pd.DataFrame) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    if QUICK_TEST:
+        logger.info("QUICK_TEST mode: tiny grid — fractions=%s  n_sims=%s  n_reps=%d", FRACTIONS, N_SIMS_GRID, N_REPS)
+
     if not PORTFOLIO_PATH.exists():
         raise FileNotFoundError(
             f"Portfolio not found at {PORTFOLIO_PATH}. "
