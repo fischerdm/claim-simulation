@@ -27,7 +27,15 @@ in `/etc/environment` and `~/.bashrc`.
 - Terraform >= 1.5 installed (`brew install terraform`)
 - AWS CLI installed (`brew install awscli`)
 - An IAM user with `AmazonEC2FullAccess` and an access key
-- The key pair `claim-simulation-frankfurt` already exists in eu-central-1
+- An EC2 key pair in eu-central-1 and its `.pem` file at `~/.ssh/`
+
+**If you don't have a key pair yet:** go to AWS Console → EC2 → Key Pairs → Create key pair.
+Download the `.pem` file and move it to `~/.ssh/`:
+```bash
+mv ~/Downloads/your-key-pair.pem ~/.ssh/
+chmod 400 ~/.ssh/your-key-pair.pem
+```
+Then update the `key_name` variable in `variables.tf` (or pass it via `-var` at apply time).
 
 ---
 
