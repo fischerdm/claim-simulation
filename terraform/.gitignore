@@ -1,0 +1,9 @@
+# Local state — may contain resource IDs and sensitive output values
+.terraform/
+terraform.tfstate
+terraform.tfstate.backup
+.terraform.lock.hcl
+
+# Variable overrides (may contain your IP or other values)
+*.tfvars
+*.tfvars.json
