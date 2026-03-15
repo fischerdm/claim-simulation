@@ -9,7 +9,8 @@ terraform {
 }
 
 provider "aws" {
-  region = "eu-central-1"
+  region  = "eu-central-1"
+  profile = "terraform-ec2"
 }
 
 # Latest Amazon Linux 2023 x86_64 AMI
