@@ -49,8 +49,8 @@ RUST_BINARY    = RUST_DIR / "target" / "release" / "claim-simulation"
 QUICK_TEST = os.getenv("QUICK_TEST", "").lower() in ("1", "true", "yes")
 
 # Scaling grids
-FRACTIONS    = [0.005, 0.01]        if QUICK_TEST else [0.25, 0.50, 1.0]
-N_SIMS_GRID  = [200, 500]           if QUICK_TEST else [2_000, 5_000, 10_000]
+FRACTIONS    = [0.005, 0.01]        if QUICK_TEST else [0.25]
+N_SIMS_GRID  = [200, 500]           if QUICK_TEST else [2_000]
 N_YEARS_GRID = [1, 5]
 
 # Repetitions for inference timing — take the minimum to suppress OS jitter.
