@@ -124,11 +124,34 @@ pip install -e .
 ## 6. Run the Data Pipeline & Simulation
 
 ```bash
+# 1. Download raw data
 python python/data/download.py
+
+# 2. Train v1 (will error at v2 — that's expected, v1 model + metadata are saved)
+python python/train.py || true
+
+# 3. Export v1 ONNX (will error at v2 — that's expected, v1 .onnx is saved)
+python python/export_onnx.py || true
+
+# 4. Generate history (now has feature_metadata.json + frequency_model.onnx)
 python python/generate_history.py
+
+# 5. Full train — now both v1 and v2 succeed
 python python/train.py
+
+# 6. Full ONNX export — now both succeed
 python python/export_onnx.py
+
+# 7. Portfolio export
 python python/export_portfolio.py
+
+# 8. Build Rust
+cd rust/
+cargo build --release
+
+# 9. Benchmark
+QUICK_TEST=1 python python/benchmark.py
+
 ```
 
 Build the Rust binary:
