@@ -101,7 +101,7 @@ ENVEOF
     # Also export in ec2-user's bashrc for interactive terminal sessions
     cat >> /home/ec2-user/.bashrc <<'BASHEOF'
 export ORT_DYLIB_PATH=/opt/onnxruntime/lib/libonnxruntime.so.1.24.3
-export LD_LIBRARY_PATH=/opt/onnxruntime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+export LD_LIBRARY_PATH=/opt/onnxruntime/lib$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}
 BASHEOF
   EOF
 
