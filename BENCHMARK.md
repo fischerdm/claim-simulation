@@ -58,6 +58,8 @@ ONNX Runtime is typically 1.5–3× faster than LightGBM `predict()` for batch i
 LightGBM's Python binding adds interpreter overhead per call; ONNX Runtime compiles the
 tree ensemble to an optimised execution plan that avoids it. The gap grows with batch size.
 
+**Observed on AWS c6i.4xlarge: this expectation does not hold.** See *Observed results* below.
+
 ---
 
 ## Study 2 — Simulation: Rust + ONNX scaling
@@ -200,6 +202,69 @@ typically sufficient.
 > run on AWS (see *Calibration run* above). The macOS Intel numbers are observed; the
 > AWS columns are placeholders.
 
+### Observed: AWS c6i.4xlarge (2026-03-15, 16 cores)
+
+#### Study 1 — Inference
+
+Two independent quick-test runs (QUICK_TEST=1, n_reps=1, min of runs):
+
+| Run | Policies | LightGBM | ONNX RT | Speedup |
+|---|---|---|---|---|
+| 1 | 3,390 (0.5%) | 8.0 ms | 15.1 ms | 0.53× |
+| 1 | 6,780 (1%) | 31.8 ms | 27.5 ms | 1.15× |
+| 2 | 3,390 (0.5%) | 8.4 ms | 17.3 ms | 0.48× |
+| 2 | 6,780 (1%) | 29.5 ms | 21.0 ms | 1.40× |
+
+Full benchmark (fraction=0.25, n_reps=3):
+
+| Policies | LightGBM | ONNX RT | Speedup |
+|---|---|---|---|
+| 169,503 (25%) | 398.6 ms | 482.1 ms | 0.83× |
+
+**Observation — non-monotonic speedup:** ONNX is slower at small batches (< ~6K policies)
+and again at large batches (~170K), but faster in the middle range (~7K). LightGBM's native
+inference appears better optimized at scale, likely due to superior cache utilization when
+the feature matrix exceeds L3 cache. The expected 1.5–3× speedup does not materialise.
+
+**Implication for portfolio sharding:** running 4 × 25% shards instead of 1 × 100%
+keeps each ONNX call in the batch-size range where ONNX is competitive, in addition to
+the parallelism benefit.
+
+#### Study 2 — Simulation
+
+Quick-test results (ms/simulation, 16 cores):
+
+| Policies | n_years | 200 sims | 500 sims |
+|---|---|---|---|
+| 3,390 (0.5%) | 1 | 38.6 | 33.7 |
+| 6,780 (1%) | 1 | 69.8 | 61.8 |
+| 3,390 (0.5%) | 5 | 151.7 | 147.8 |
+| 6,780 (1%) | 5 | 297.3 | 290.1 |
+
+Full benchmark (fraction=0.25, n_sims=2,000, 16 cores):
+
+| Policies | n_years | ms/sim | Wall time |
+|---|---|---|---|
+| 169,503 (25%) | 1 | 2,979.8 | ~99 min |
+| 169,503 (25%) | 5 | 9,879.1 | ~5.5 hours |
+
+**T_inference on EC2:** ~58 ms per ONNX call for 6,780 policies → ~8.6 µs/policy,
+roughly 12× faster than macOS Intel (100 µs/policy). Consistent with AVX-512 advantage
+on Ice Lake vs. pre-2020 Intel Mac.
+
+**Scaling to full portfolio (extrapolated, linear in N):**
+
+| Config | Wall time (1 instance) |
+|---|---|
+| 678K policies, 5 years, 2,000 sims | ~22 hours |
+| 5 coverages × 678K, 5 years, 2,000 sims (sequential) | ~110 hours (~4.6 days) |
+| Same, sharded across 4 × c6i.4xlarge (25% each) | ~5.5 hours/shard in parallel |
+
+At ~$0.82/hr on-demand per c6i.4xlarge, a full 5-coverage simulation costs roughly
+$90–$160 depending on parallelisation strategy — negligible for a company.
+
+---
+
 ### Observed: macOS Intel (calibration run, 2026-03-07)
 
 | Run | Policies | n_sims | n_years | Cores | T_total | T_startup | T_compute | T_inference/call |
@@ -225,7 +290,7 @@ The throughput column is the key unknown; **fill in after the AWS calibration ru
 |---|---|---|---|---|---|
 | Intel MacBook (dev) | 8 | ~24 s | ~10,000 | ~6 h | — |
 | AWS c6i.2xlarge | 8 | TBD | TBD | TBD | $0.34 |
-| AWS c6i.4xlarge | 16 | TBD | TBD | TBD | $0.68 |
+| AWS c6i.4xlarge | 16 | ~1–2 s | ~116,000 | ~22 h (extrapolated from 25%) | $0.68 |
 | AWS c6i.8xlarge | 32 | TBD | TBD | TBD | $1.36 |
 | AWS c6i.16xlarge | 64 | TBD | TBD | TBD | $2.72 |
 
