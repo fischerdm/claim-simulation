@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Recursive Monte Carlo Claim Simulation for Non-Life Insurance Pricing — An Optimized Approach</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      font-size: 16px;
+      line-height: 1.65;
+      color: #1a1a2e;
+      background: #f8f9fb;
+    }
+
+    /* ── header ── */
+    header {
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 60%, #0f3460 100%);
+      color: #fff;
+      padding: 64px 24px 52px;
+      text-align: center;
+    }
+    header h1 {
+      font-size: clamp(1.8rem, 5vw, 2.8rem);
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      margin-bottom: 32px;
+    }
+
+    /* ── tech stack icons ── */
+    .stack-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0;
+      margin-bottom: 32px;
+      flex-wrap: wrap;
+    }
+    .stack-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+    .stack-item img {
+      width: 52px;
+      height: 52px;
+      display: block;
+    }
+    .stack-item .stack-label {
+      font-size: 0.78rem;
+      font-weight: 600;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      color: rgba(255,255,255,0.6);
+    }
+    .stack-connector {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      padding: 0 20px;
+    }
+    .stack-connector .conn-line {
+      width: 48px;
+      height: 1.5px;
+      background: rgba(255,255,255,0.25);
+      margin-top: 18px; /* align with center of icons */
+    }
+    .stack-connector .conn-label {
+      font-size: 0.7rem;
+      color: rgba(255,255,255,0.3);
+      letter-spacing: 0.5px;
+      margin-top: -6px;
+    }
+    /* ONNX centre piece */
+    .stack-onnx {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+    .onnx-badge {
+      width: 52px;
+      height: 52px;
+      border-radius: 12px;
+      border: 1.5px solid rgba(255,255,255,0.35);
+      background: rgba(255,255,255,0.08);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.75rem;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+      color: #fff;
+      line-height: 1.15;
+      text-align: center;
+    }
+    .stack-onnx .stack-label {
+      font-size: 0.78rem;
+      font-weight: 600;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      color: rgba(255,255,255,0.6);
+    }
+    header p.subtitle {
+      font-size: 1.1rem;
+      color: #a8c5f0;
+      max-width: 620px;
+      margin: 0 auto 28px;
+    }
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      justify-content: center;
+    }
+    .badge {
+      background: rgba(255,255,255,0.12);
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 20px;
+      padding: 4px 14px;
+      font-size: 0.82rem;
+      color: #d4e8ff;
+      letter-spacing: 0.3px;
+    }
+
+    /* ── layout ── */
+    main {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 0 24px 80px;
+    }
+
+    section {
+      margin-top: 56px;
+    }
+
+    h2 {
+      font-size: 1.45rem;
+      font-weight: 700;
+      color: #0f3460;
+      border-bottom: 2px solid #e0e7f3;
+      padding-bottom: 8px;
+      margin-bottom: 20px;
+    }
+
+    h3 {
+      font-size: 1.05rem;
+      font-weight: 600;
+      color: #1a1a2e;
+      margin: 28px 0 10px;
+    }
+
+    p { margin-bottom: 14px; }
+    p:last-child { margin-bottom: 0; }
+
+    a { color: #0f3460; }
+    a:hover { color: #e94560; }
+
+    /* ── pipeline diagram ── */
+    .pipeline {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0;
+      margin: 24px 0;
+      justify-content: center;
+    }
+    .pipe-step {
+      background: #fff;
+      border: 1.5px solid #ccd8ed;
+      border-radius: 8px;
+      padding: 10px 16px;
+      text-align: center;
+      min-width: 130px;
+    }
+    .pipe-step .lang {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: #7a90b8;
+      margin-bottom: 2px;
+    }
+    .pipe-step .label {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: #1a1a2e;
+    }
+    .pipe-arrow {
+      font-size: 1.2rem;
+      color: #7a90b8;
+      padding: 0 6px;
+      flex-shrink: 0;
+    }
+    .pipe-step.rust { border-color: #c98a5a; }
+    .pipe-step.rust .lang { color: #a85e28; }
+
+    /* ── callout box ── */
+    .callout {
+      background: #fff8e7;
+      border-left: 4px solid #f0a500;
+      border-radius: 0 6px 6px 0;
+      padding: 14px 18px;
+      margin: 20px 0;
+      font-size: 0.95rem;
+    }
+    .callout.insight {
+      background: #eaf4ff;
+      border-color: #0f3460;
+    }
+    .callout strong { font-weight: 700; }
+
+    /* ── tables ── */
+    .table-wrap { overflow-x: auto; margin: 18px 0; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+    th {
+      background: #0f3460;
+      color: #fff;
+      font-weight: 600;
+      padding: 9px 14px;
+      text-align: left;
+      white-space: nowrap;
+    }
+    td {
+      padding: 8px 14px;
+      border-bottom: 1px solid #e4eaf5;
+      vertical-align: top;
+    }
+    tr:nth-child(even) td { background: #f4f7fc; }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    td.hl { font-weight: 600; color: #0f3460; }
+    td.warn { color: #b05000; font-weight: 600; }
+    td.good { color: #1a7a3a; font-weight: 600; }
+
+    /* ── formula block ── */
+    .formula {
+      background: #1a1a2e;
+      color: #a8f0c8;
+      border-radius: 6px;
+      padding: 14px 20px;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.88rem;
+      margin: 16px 0;
+      overflow-x: auto;
+    }
+
+    /* ── sim output ── */
+    .sim-output {
+      background: #0d1117;
+      color: #c9d1d9;
+      border-radius: 6px;
+      padding: 16px 20px;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.7;
+      margin: 16px 0;
+      overflow-x: auto;
+    }
+    .sim-output .dim  { color: #6e7681; }
+    .sim-output .head { color: #79c0ff; font-weight: bold; }
+    .sim-output .val  { color: #a5d6ff; }
+    .sim-output .t0   { color: #ffa657; }
+
+    /* ── cost bar ── */
+    .cost-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin: 8px 0;
+      font-size: 0.9rem;
+    }
+    .cost-label { min-width: 240px; color: #444; }
+    .cost-bar-bg {
+      flex: 1;
+      height: 10px;
+      background: #e0e7f3;
+      border-radius: 5px;
+      overflow: hidden;
+    }
+    .cost-bar { height: 100%; border-radius: 5px; background: #0f3460; }
+    .cost-val { min-width: 60px; text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+
+    /* ── footer ── */
+    footer {
+      text-align: center;
+      font-size: 0.83rem;
+      color: #7a90b8;
+      padding: 32px 24px;
+      border-top: 1px solid #dde4f0;
+    }
+    footer a { color: #7a90b8; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Recursive Monte Carlo Claim Simulation for Non-Life Insurance Pricing — An Optimized Approach</h1>
+
+  <div class="stack-row">
+    <!-- Python -->
+    <div class="stack-item">
+      <img src="https://cdn.simpleicons.org/python/ffffff" alt="Python" width="52" height="52">
+      <span class="stack-label">Python</span>
+    </div>
+
+    <div class="stack-connector">
+      <div class="conn-line"></div>
+      <div class="conn-label">trains</div>
+    </div>
+
+    <!-- ONNX — centre piece -->
+    <div class="stack-onnx">
+      <div class="onnx-badge">ONNX</div>
+      <span class="stack-label">ONNX</span>
+    </div>
+
+    <div class="stack-connector">
+      <div class="conn-line"></div>
+      <div class="conn-label">drives</div>
+    </div>
+
+    <!-- Rust -->
+    <div class="stack-item">
+      <img src="https://cdn.simpleicons.org/rust/ffffff" alt="Rust" width="52" height="52">
+      <span class="stack-label">Rust</span>
+    </div>
+  </div>
+
+  <p class="subtitle">A non-life actuarial frequency model trained in Python, exported to ONNX,
+    and driven by a high-speed Monte Carlo engine written in Rust.</p>
+  <div class="badge-row">
+    <span class="badge">Python · LightGBM · Poisson GLM</span>
+    <span class="badge">ONNX Runtime</span>
+    <span class="badge">Rust · Rayon</span>
+    <span class="badge">678 K policies · 5-year projection</span>
+    <span class="badge">AWS c6i.4xlarge</span>
+  </div>
+</header>
+
+<main>
+
+  <!-- ── WHY ── -->
+  <section>
+    <h2>The problem</h2>
+    <p>
+      Non-life insurers need to project claim experience forward in time to set
+      technical prices, estimate reserves, and compute regulatory capital (Solvency II SCR).
+      A straightforward point estimate of expected claim frequency λ is enough for
+      single-year pricing, but it breaks down for multi-year projections.
+    </p>
+    <p>
+      The reason: experience features — like <strong>PriorClaims3Y</strong>,
+      a rolling three-year claim count — change each year as simulated claims accumulate.
+      Because λ depends on those features, it must be recomputed annually.
+      There is no closed-form solution; Monte Carlo simulation is the only option.
+    </p>
+
+    <div class="callout insight">
+      <strong>The feedback loop.</strong> Year-0 draws update PriorClaims3Y → year-1
+      lambdas differ per simulation → year-1 draws update PriorClaims3Y again → and so on
+      for T years. Each simulation follows a distinct path through feature space.
+    </div>
+
+    <p>This project answers two questions:</p>
+    <ol style="margin: 10px 0 0 20px; line-height:2">
+      <li><strong>Inference:</strong> for single-year batch scoring, is ONNX Runtime faster than native LightGBM?</li>
+      <li><strong>Simulation:</strong> how fast can the multi-year recursive simulation scale with portfolio size and sim count?</li>
+    </ol>
+  </section>
+
+  <!-- ── ARCHITECTURE ── -->
+  <section>
+    <h2>Architecture</h2>
+
+    <div class="pipeline">
+      <div class="pipe-step">
+        <div class="lang">Python</div>
+        <div class="label">Train LightGBM</div>
+      </div>
+      <div class="pipe-arrow">→</div>
+      <div class="pipe-step">
+        <div class="lang">Python</div>
+        <div class="label">Export ONNX</div>
+      </div>
+      <div class="pipe-arrow">→</div>
+      <div class="pipe-step rust">
+        <div class="lang">Rust · ort</div>
+        <div class="label">Load &amp; Infer</div>
+      </div>
+      <div class="pipe-arrow">→</div>
+      <div class="pipe-step rust">
+        <div class="lang">Rust · Rayon</div>
+        <div class="label">Parallel Sims</div>
+      </div>
+    </div>
+
+    <h3>The model</h3>
+    <p>
+      A LightGBM Poisson GLM trained on
+      <a href="https://www.openml.org/d/41214" target="_blank" rel="noopener">freMTPL2freq</a>
+      — 678,013 French Motor Third Party Liability policies.
+      The model predicts the expected annual claim frequency λ per policy.
+      <code>log(Exposure)</code> is used as an offset so partial-year policies are handled correctly.
+    </p>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Feature</th>
+            <th>Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>VehPower, VehAge</td><td>Vehicle engine power and age</td></tr>
+          <tr><td>DrivAge</td><td>Driver age in years</td></tr>
+          <tr><td>Density</td><td>Population density of driver's municipality</td></tr>
+          <tr><td class="hl">PriorClaims3Y</td><td>Rolling 3-year claim count — updated each simulation year</td></tr>
+          <tr><td>Area, VehBrand, VehGas, Region</td><td>Categorical features (label-encoded)</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>
+      BonusMalus is excluded: it cannot be projected forward without a separate
+      bonus-malus transition model. PriorClaims3Y serves as a lightweight, simulatable
+      experience feature in its place.
+    </p>
+
+    <h3>Rust simulation engine</h3>
+    <p>
+      Each Rayon worker thread owns one ONNX session loaded lazily on first use.
+      Once warm, threads run with no lock contention:
+    </p>
+
+    <div class="formula">
+for sim in 0..n_sims (parallel across threads):
+    for year in 0..n_years:
+        build [N, 9] feature matrix        // with current PriorClaims3Y
+        λ = onnx_session.run(matrix)       // one ONNX call
+        claims = Poisson(λ × exposure)     // vectorised Poisson draws
+        shift rolling 3-year window        // [w1, w2, w3] → [w2, w3, claims]
+        VehAge += 1, DrivAge += 1</div>
+
+    <p>
+      The ONNX model outputs λ in the original scale — <code>onnxmltools</code> preserves
+      LightGBM's internal <code>exp()</code> transform. Expected claims per policy
+      are therefore <code>μ = λ × exposure</code>, not <code>exp(log_λ + log_exposure)</code>.
+    </p>
+  </section>
+
+  <!-- ── STUDY 1 ── -->
+  <section>
+    <h2>Study 1 — Inference: LightGBM vs ONNX Runtime</h2>
+    <p>
+      Both engines receive the same <code>[N, 9]</code> float32 feature matrix and return
+      λ per policy. Each measurement is the minimum of 3 repetitions to suppress OS scheduling
+      jitter; a warmup call is made first to exclude library-init overhead.
+    </p>
+
+    <h3>Observed results — AWS c6i.4xlarge (16 cores)</h3>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Policies</th>
+            <th class="num">LightGBM</th>
+            <th class="num">ONNX Runtime</th>
+            <th class="num">Speedup</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>169,503 (25%)</td>
+            <td class="num good">399 ms</td>
+            <td class="num warn">482 ms</td>
+            <td class="num warn">0.83×</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout">
+      <strong>Surprise: ONNX is slower at scale.</strong> The conventional expectation
+      is a 1.5–3× ONNX speedup from its compiled tree-ensemble execution plan.
+      On a large batch (~170K policies), LightGBM's native inference appears better
+      optimised — likely due to superior cache utilisation once the feature matrix
+      exceeds L3 cache size. The gap reverses in the ~7K-policy range.
+    </div>
+
+    <h3>Implication: portfolio sharding</h3>
+    <p>
+      If ONNX is the inference backend (as it must be for the Rust engine),
+      splitting a large portfolio into smaller shards keeps each ONNX call in the
+      batch-size range where it is competitive — and delivers parallelism for free.
+      Running 4 × 25% shards concurrently is strictly better than 1 × 100% sequentially.
+    </p>
+  </section>
+
+  <!-- ── STUDY 2 ── -->
+  <section>
+    <h2>Study 2 — Simulation: Rust + ONNX scaling</h2>
+
+    <h3>Observed results — AWS c6i.4xlarge (16 cores, 169 K policies)</h3>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Policies</th>
+            <th>Years</th>
+            <th class="num">Sims</th>
+            <th class="num">ms / sim</th>
+            <th class="num">Wall time</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>169,503 (25%)</td>
+            <td>1</td>
+            <td class="num">2,000</td>
+            <td class="num">2,980</td>
+            <td class="num">~99 min</td>
+          </tr>
+          <tr>
+            <td>169,503 (25%)</td>
+            <td>5</td>
+            <td class="num">2,000</td>
+            <td class="num">9,879</td>
+            <td class="num">~5.5 hours</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>
+      ONNX inference on EC2 is approximately <strong>12× faster than on a 2019 Intel Mac</strong>
+      (~8.6 µs/policy vs ~100 µs/policy), consistent with the AVX-512 advantage on
+      AWS Ice Lake instances.
+    </p>
+
+    <h3>Simulated claim frequency over time</h3>
+    <p>
+      Output from the macOS calibration run (10 K policies, 500 sims, 5 years).
+      Year 0 uses partial-year exposure from the portfolio; years 1–4 use full-year exposure.
+    </p>
+
+    <div class="sim-output">
+<span class="head">=== Multi-Year Claim Simulation (500 sims × 5 years × 10,000 policies) ===</span>
+
+<span class="dim">Year     Mean claims   Mean freq    P50 freq    P95 freq    P99 freq</span>
+<span class="dim">--------------------------------------------------------------</span>
+<span class="t0">t=0            527.7     0.05277     0.05280     0.05650     0.05801</span>  <span class="dim">← partial year</span>
+<span class="val">t=1            900.3     0.09003     0.08990     0.09500     0.09730</span>
+<span class="val">t=2            866.0     0.08660     0.08680     0.09121     0.09230</span>
+<span class="val">t=3            831.8     0.08318     0.08320     0.08800     0.08980</span>
+<span class="val">t=4            831.1     0.08311     0.08310     0.08750     0.08920</span>
+    </div>
+
+    <div class="callout insight">
+      <strong>Mean reversion.</strong> Frequency peaks at t=1 (annualised, full exposure)
+      and declines gradually as PriorClaims3Y mean-reverts toward the portfolio average.
+      This is a natural consequence of the rolling window: high-claim policies accumulate
+      history, raising their λ, but regression to the mean pulls aggregate frequency down
+      over subsequent years.
+    </div>
+
+    <h3>The session-loading constraint</h3>
+    <p>
+      ONNX Runtime holds a global lock during session initialisation. Even with Rayon's
+      work-stealing scheduler, sessions load sequentially:
+    </p>
+    <div class="formula">T_startup ≈ n_threads × T_session    (~25 s/session on macOS Intel, ~1–2 s on EC2)</div>
+    <p>
+      This means adding more threads eventually hurts: startup cost grows faster than
+      compute shrinks. The optimal thread count balances the two:
+    </p>
+    <div class="formula">k* ≈ √( n_sims × n_years × T_inference(N) / T_session )</div>
+    <p>
+      On EC2, with T_inference(678K) ≈ 5.8 s and T_session ≈ 1–2 s,
+      k* is in the range of 60–100 threads — well above the 16 cores on a c6i.4xlarge,
+      meaning linear scaling holds across the full instance for production workloads.
+    </p>
+
+    <h3>How many simulations are enough?</h3>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Use case</th>
+            <th>Target statistic</th>
+            <th class="num">Recommended sims</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Pricing / expected loss</td><td>Mean frequency</td><td class="num">500–1,000</td></tr>
+          <tr><td>Reserving, confidence intervals</td><td>P95</td><td class="num">1,000–2,000</td></tr>
+          <tr><td>Capital / risk margin</td><td>P99</td><td class="num">2,000–5,000</td></tr>
+          <tr><td class="hl">Solvency II / regulatory capital</td><td class="hl">P99.5 (SCR)</td><td class="num hl">5,000–10,000</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      <strong>Default recommendation: 2,500 sims.</strong> This gives reliable P99 estimates
+      (≈ 0.2% SE in probability space) at a reasonable compute cost for most pricing and
+      reserving tasks.
+    </p>
+  </section>
+
+  <!-- ── COST ── -->
+  <section>
+    <h2>Cost estimates (AWS on-demand)</h2>
+    <p>
+      Extrapolating from the 25%-portfolio result (linear in N),
+      a full 678K-policy, 5-year, 2,000-sim run on one c6i.4xlarge takes roughly 22 hours.
+      A sharding strategy across four instances reduces wall time to ~5.5 hours per shard.
+    </p>
+
+    <div style="margin: 20px 0 10px; font-size:0.85rem; color:#666;">
+      Cost per scenario (5 coverages × full portfolio × 5 years × 2,000 sims)
+    </div>
+
+    <div class="cost-row">
+      <div class="cost-label">1 × c6i.4xlarge · sequential (~4.6 days)</div>
+      <div class="cost-bar-bg"><div class="cost-bar" style="width:100%"></div></div>
+      <div class="cost-val">~$180</div>
+    </div>
+    <div class="cost-row">
+      <div class="cost-label">4 × c6i.4xlarge · sharded (~5.5 h/shard)</div>
+      <div class="cost-bar-bg"><div class="cost-bar" style="width:50%"></div></div>
+      <div class="cost-val">~$90</div>
+    </div>
+    <div class="cost-row">
+      <div class="cost-label">Same, Spot instances (~70% discount)</div>
+      <div class="cost-bar-bg"><div class="cost-bar" style="width:15%"></div></div>
+      <div class="cost-val">~$27</div>
+    </div>
+
+    <p style="margin-top:16px">
+      Negligible at company scale — the bottleneck is actuary time, not compute cost.
+    </p>
+  </section>
+
+  <!-- ── REPO ── -->
+  <section>
+    <h2>Explore the project</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Resource</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><a href="https://github.com/fischerdm/claim-simulation" target="_blank" rel="noopener">GitHub repository</a></td><td>Full source: Python pipeline, Rust engine, Terraform</td></tr>
+          <tr><td><a href="https://github.com/fischerdm/claim-simulation/blob/main/BENCHMARK.md" target="_blank" rel="noopener">BENCHMARK.md</a></td><td>Study design, full results tables, capacity planning formulas</td></tr>
+          <tr><td><a href="https://github.com/fischerdm/claim-simulation/blob/main/README.md" target="_blank" rel="noopener">README.md</a></td><td>Setup guide, pipeline steps, Rust CLI reference</td></tr>
+          <tr><td><a href="https://www.openml.org/d/41214" target="_blank" rel="noopener">freMTPL2freq dataset</a></td><td>678,013 French MTPL policies on OpenML</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  Built with LightGBM · ONNX Runtime · Rust · Rayon ·
+  Dataset: <a href="https://www.openml.org/d/41214" target="_blank" rel="noopener">freMTPL2freq</a> (OpenML 41214)
+</footer>
+
+</body>
+</html>
