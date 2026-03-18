@@ -40,11 +40,16 @@ claim-simulation/
 │   ├── freMTPL2freq.csv                # raw dataset (generated, not in git)
 │   ├── freMTPL2freq_with_history.csv   # augmented with synthetic claim history (generated)
 │   ├── portfolio.csv                   # v1 portfolio — kept for reference (generated)
-│   └── portfolio_v2.csv                # v2 portfolio — full 678K policies (generated)
+│   ├── portfolio_v2.csv                # v2 portfolio — full 678K policies (generated)
+│   └── eda/
+│       └── lgb_vs_onnx.png             # LightGBM vs ONNX scatter plot (generated)
 ├── models/
+│   ├── frequency_model.lgb             # v1 LightGBM model (generated)
+│   ├── frequency_model.onnx            # v1 ONNX export (generated)
+│   ├── feature_metadata.json           # v1 feature encodings
 │   ├── frequency_model_v2.lgb          # v2 LightGBM model (generated)
 │   ├── frequency_model_v2.onnx         # v2 ONNX export (generated)
-│   └── feature_metadata_v2.json        # feature names and category encodings
+│   └── feature_metadata_v2.json        # v2 feature names and category encodings
 ├── python/
 │   ├── data/
 │   │   └── download.py                 # downloads freMTPL2freq from OpenML
@@ -56,7 +61,8 @@ claim-simulation/
 │   ├── eda.py                          # exploratory data analysis plots
 │   └── benchmark.py                    # runs both benchmark studies
 ├── results/
-│   └── benchmark_results.csv           # timing results (generated, not in git)
+│   ├── benchmark_results.csv           # timing results from benchmark runs
+│   └── calibration_run.txt             # macOS Intel calibration run output
 ├── rust/
 │   ├── .cargo/
 │   │   └── config.toml                 # sets ORT_DYLIB_PATH for cargo run
@@ -66,7 +72,14 @@ claim-simulation/
 │   │   ├── portfolio.rs                # Policy struct and CSV loader
 │   │   └── simulator_multiyear.rs      # parallel multi-year simulation (Rayon)
 │   └── Cargo.toml
-└── BENCHMARK.md                        # study design and runtime estimates
+├── terraform/
+│   ├── main.tf                         # EC2 instance, security group, Elastic IP
+│   ├── variables.tf                    # key pair name, allowed CIDR
+│   ├── outputs.tf                      # public IP, instance ID, SSH command
+│   └── TERRAFORM_GUIDE.md             # Terraform setup instructions
+├── BENCHMARK.md                        # study design, observed runtimes, capacity planning
+├── EC2_SETUP_GUIDE.md                  # manual EC2 setup (steps 1–5)
+└── SIMULATION_GUIDE.md                 # data pipeline, benchmark, shutdown
 ```
 
 ## Dataset
@@ -85,6 +98,11 @@ brew install libomp
 ```
 
 Without this, `import lightgbm` fails with a missing `libomp.dylib` error.
+
+> **Performance note:** macOS is suitable for development and quick tests (`QUICK_TEST=1`),
+> but not for the full simulation. On an older Intel Mac, ONNX inference is ~12× slower than
+> on an AWS c6i instance (no AVX-512), making a full 678K-policy / 5-year run impractical.
+> For production runs, use EC2 — see [EC2_SETUP_GUIDE.md](EC2_SETUP_GUIDE.md).
 
 ### Python environment
 
@@ -212,12 +230,4 @@ python python/benchmark.py
 Results are saved to `results/benchmark_results.csv`. The `n_cores` column lets you
 stack results from multiple machines for cross-instance comparison.
 
-See [BENCHMARK.md](BENCHMARK.md) for the full study design and runtime estimates.
-Hardware summary:
-
-| Machine | Cores | Estimated full runtime |
-|---|---|---|
-| Intel MacBook (4 cores) | 4 | ~75 min |
-| AWS c5.4xlarge | 16 | ~20 min |
-| AWS c5.18xlarge | 72 | ~5 min |
-| AWS c5.metal | 96 | ~4 min |
+See [BENCHMARK.md](BENCHMARK.md) for the full study design, observed runtimes, and capacity planning guidance.
