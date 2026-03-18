@@ -125,58 +125,10 @@ pip install -e .
 
 ---
 
-## 6. Run the Data Pipeline & Simulation
+## 6. Run the Simulation
 
-```bash
-# 1. Download raw data
-python python/data/download.py
-
-# 2. Train v1 (will error at v2 — that's expected, v1 model + metadata are saved)
-python python/train.py || true
-
-# 3. Export v1 ONNX (will error at v2 — that's expected, v1 .onnx is saved)
-python python/export_onnx.py || true
-
-# 4. Generate history (now has feature_metadata.json + frequency_model.onnx)
-python python/generate_history.py
-
-# 5. Full train — now both v1 and v2 succeed
-python python/train.py
-
-# 6. Full ONNX export — now both succeed
-python python/export_onnx.py
-
-# 7. Portfolio export
-python python/export_portfolio.py
-
-# 8. Build Rust
-cd rust/
-cargo build --release
-
-# 9. Benchmark
-QUICK_TEST=1 python python/benchmark.py
-
-```
-
-Build the Rust binary:
-```bash
-cd rust
-cargo build --release
-cd ..
-```
-
-Run benchmark:
-```bash
-QUICK_TEST=1 python python/benchmark.py
-```
-
----
-
-## 7. Stopping the Instance
-
-When done, **stop** (do not terminate) the instance in the AWS Console to preserve the filesystem. You only pay for EBS storage (~$2.40/month for 30 GB) while stopped.
-
-> When you restart, update the IP in `~/.ssh/config` with the new Public IPv4, or set up an Elastic IP to avoid this.
+Once the environment is set up, follow [SIMULATION_GUIDE.md](SIMULATION_GUIDE.md) for the
+data pipeline, benchmark, and instance shutdown instructions.
 
 ---
 
