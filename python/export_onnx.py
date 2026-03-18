@@ -95,8 +95,14 @@ def export_model(lgb_path: Path, onnx_path: Path, meta_path: Path) -> None:
 
 
 def main() -> None:
-    for lgb_path, onnx_path, meta_path in EXPORT_TARGETS:
-        export_model(lgb_path, onnx_path, meta_path)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Export LightGBM model to ONNX.")
+    parser.add_argument("version", choices=["v1", "v2"], help="Model version to export.")
+    args = parser.parse_args()
+
+    idx = 0 if args.version == "v1" else 1
+    export_model(*EXPORT_TARGETS[idx])
 
 
 if __name__ == "__main__":

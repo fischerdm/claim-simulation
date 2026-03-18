@@ -220,8 +220,13 @@ def train_one(spec: ModelSpec) -> None:
 
 
 def main() -> None:
-    train_one(V1)
-    train_one(V2)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Train LightGBM frequency model.")
+    parser.add_argument("version", choices=["v1", "v2"], help="Model version to train.")
+    args = parser.parse_args()
+
+    train_one(V1 if args.version == "v1" else V2)
 
 
 if __name__ == "__main__":
