@@ -212,12 +212,4 @@ python python/benchmark.py
 Results are saved to `results/benchmark_results.csv`. The `n_cores` column lets you
 stack results from multiple machines for cross-instance comparison.
 
-See [BENCHMARK.md](BENCHMARK.md) for the full study design and runtime estimates.
-Hardware summary:
-
-| Machine | Cores | Estimated full runtime |
-|---|---|---|
-| Intel MacBook (4 cores) | 4 | ~75 min |
-| AWS c5.4xlarge | 16 | ~20 min |
-| AWS c5.18xlarge | 72 | ~5 min |
-| AWS c5.metal | 96 | ~4 min |
+See [BENCHMARK.md](BENCHMARK.md) for the full study design, observed runtimes, and capacity planning guidance.
