@@ -9,30 +9,26 @@ For EC2 setup, see [EC2_SETUP_GUIDE.md](EC2_SETUP_GUIDE.md).
 
 ## 1. Run the Data Pipeline
 
-Run these steps in order from the repo root:
+From the repo root:
 
 ```bash
-# 1. Download raw data
-python python/data/download.py
-
-# 2. Train v1 (will error at v2 — that's expected, v1 model + metadata are saved)
-python python/train.py || true
-
-# 3. Export v1 ONNX (will error at v2 — that's expected, v1 .onnx is saved)
-python python/export_onnx.py || true
-
-# 4. Generate history (now has feature_metadata.json + frequency_model.onnx)
-python python/generate_history.py
-
-# 5. Full train — now both v1 and v2 succeed
-python python/train.py
-
-# 6. Full ONNX export — now both succeed
-python python/export_onnx.py
-
-# 7. Portfolio export
-python python/export_portfolio.py
+make
 ```
+
+This runs all seven steps in dependency order, skipping any that are already up to date:
+
+| Step | Script | Output |
+|------|--------|--------|
+| 1 | `download.py` | `data/freMTPL2freq.csv` |
+| 2 | `train.py v1` | `models/frequency_model.lgb` |
+| 3 | `export_onnx.py v1` | `models/frequency_model.onnx` |
+| 4 | `generate_history.py` | `data/freMTPL2freq_with_history.csv` |
+| 5 | `train.py v2` | `models/frequency_model_v2.lgb` |
+| 6 | `export_onnx.py v2` | `models/frequency_model_v2.onnx` |
+| 7 | `export_portfolio.py` | `data/portfolio.csv`, `data/portfolio_v2.csv` |
+
+Steps 4–6 depend on v1 (v2 uses synthetic claim history generated from the v1 ONNX model).
+To rebuild from scratch: `make clean && make`.
 
 ---
 
