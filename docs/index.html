@@ -26,7 +26,84 @@
       font-size: clamp(1.8rem, 5vw, 2.8rem);
       font-weight: 700;
       letter-spacing: -0.5px;
-      margin-bottom: 14px;
+      margin-bottom: 32px;
+    }
+
+    /* ── tech stack icons ── */
+    .stack-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0;
+      margin-bottom: 32px;
+      flex-wrap: wrap;
+    }
+    .stack-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+    .stack-item img {
+      width: 52px;
+      height: 52px;
+      display: block;
+    }
+    .stack-item .stack-label {
+      font-size: 0.78rem;
+      font-weight: 600;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      color: rgba(255,255,255,0.6);
+    }
+    .stack-connector {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      padding: 0 20px;
+    }
+    .stack-connector .conn-line {
+      width: 48px;
+      height: 1.5px;
+      background: rgba(255,255,255,0.25);
+      margin-top: 18px; /* align with center of icons */
+    }
+    .stack-connector .conn-label {
+      font-size: 0.7rem;
+      color: rgba(255,255,255,0.3);
+      letter-spacing: 0.5px;
+      margin-top: -6px;
+    }
+    /* ONNX centre piece */
+    .stack-onnx {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+    .onnx-badge {
+      width: 52px;
+      height: 52px;
+      border-radius: 12px;
+      border: 1.5px solid rgba(255,255,255,0.35);
+      background: rgba(255,255,255,0.08);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.75rem;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+      color: #fff;
+      line-height: 1.15;
+      text-align: center;
+    }
+    .stack-onnx .stack-label {
+      font-size: 0.78rem;
+      font-weight: 600;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      color: rgba(255,255,255,0.6);
     }
     header p.subtitle {
       font-size: 1.1rem;
@@ -226,6 +303,37 @@
 
 <header>
   <h1>Claim Simulation</h1>
+
+  <div class="stack-row">
+    <!-- Python -->
+    <div class="stack-item">
+      <img src="https://cdn.simpleicons.org/python/ffffff" alt="Python" width="52" height="52">
+      <span class="stack-label">Python</span>
+    </div>
+
+    <div class="stack-connector">
+      <div class="conn-line"></div>
+      <div class="conn-label">trains</div>
+    </div>
+
+    <!-- ONNX — centre piece -->
+    <div class="stack-onnx">
+      <div class="onnx-badge">ONNX</div>
+      <span class="stack-label">ONNX</span>
+    </div>
+
+    <div class="stack-connector">
+      <div class="conn-line"></div>
+      <div class="conn-label">drives</div>
+    </div>
+
+    <!-- Rust -->
+    <div class="stack-item">
+      <img src="https://cdn.simpleicons.org/rust/ffffff" alt="Rust" width="52" height="52">
+      <span class="stack-label">Rust</span>
+    </div>
+  </div>
+
   <p class="subtitle">A non-life actuarial frequency model trained in Python, exported to ONNX,
     and driven by a high-speed Monte Carlo engine written in Rust.</p>
   <div class="badge-row">
