@@ -14,6 +14,10 @@ This guide documents how to launch an AWS EC2 instance for running the Monte Car
 
 ## 1. Launch EC2 Instance
 
+> **Alternatively**, use Terraform to automate steps 1–3 (instance provisioning, SSH config,
+> and bootstrapping). See [terraform/TERRAFORM_GUIDE.md](terraform/TERRAFORM_GUIDE.md),
+> then continue from **step 4** of this guide.
+
 In the AWS Console → EC2 → Launch Instance:
 
 | Setting | Value |
