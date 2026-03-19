@@ -105,6 +105,12 @@
       text-transform: uppercase;
       color: rgba(255,255,255,0.6);
     }
+    header p.byline {
+      font-size: 0.82rem;
+      color: rgba(255,255,255,0.45);
+      letter-spacing: 0.5px;
+      margin-bottom: 28px;
+    }
     header p.subtitle {
       font-size: 1.1rem;
       color: #a8c5f0;
@@ -250,6 +256,7 @@
       font-size: 0.88rem;
       margin: 16px 0;
       overflow-x: auto;
+      white-space: pre;
     }
 
     /* ── sim output ── */
@@ -336,6 +343,7 @@
 
   <p class="subtitle">A non-life actuarial frequency model trained in Python, exported to ONNX,
     and driven by a high-speed Monte Carlo engine written in Rust.</p>
+  <p class="byline">David Fischer · March 2026</p>
   <div class="badge-row">
     <span class="badge">Python · LightGBM · Poisson GLM</span>
     <span class="badge">ONNX Runtime</span>
@@ -445,9 +453,13 @@
     <div class="formula">
 for sim in 0..n_sims (parallel across threads):
     for year in 0..n_years:
+        // 1. Build feature matrix with current state
         build [N, 9] feature matrix        // with current PriorClaims3Y
-        λ = onnx_session.run(matrix)       // one ONNX call
-        claims = Poisson(λ × exposure)     // vectorised Poisson draws
+        // 2. Score all policies in one ONNX call
+        λ = onnx_session.run(matrix)       // annual frequency per policy
+        // 3. Draw claims
+        claims = Poisson(λ × exposure)     // exposure = portfolio value at t=0, 1.0 thereafter
+        // 4. Update state for next year
         shift rolling 3-year window        // [w1, w2, w3] → [w2, w3, claims]
         VehAge += 1, DrivAge += 1</div>
 
