@@ -456,7 +456,7 @@ for sim in 0..n_sims (parallel across threads):
         λ = onnx_session.run(matrix)       // one ONNX call
         claims = Poisson(λ × exposure)     // vectorised Poisson draws
         shift rolling 3-year window        // [w1, w2, w3] → [w2, w3, claims]
-        VehAge += 1, DrivAge += 1</div>
+        VehAge += 1, DrivAge += 1          // age for next year</div>
 
     <p>
       The ONNX model outputs λ in the original scale — <code>onnxmltools</code> preserves
