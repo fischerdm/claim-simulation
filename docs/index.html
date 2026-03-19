@@ -256,6 +256,7 @@
       font-size: 0.88rem;
       margin: 16px 0;
       overflow-x: auto;
+      white-space: pre;
     }
 
     /* ── sim output ── */
@@ -452,11 +453,15 @@
     <div class="formula">
 for sim in 0..n_sims (parallel across threads):
     for year in 0..n_years:
+        // 1. Build feature matrix with current state
         build [N, 9] feature matrix        // with current PriorClaims3Y
-        λ = onnx_session.run(matrix)       // one ONNX call
-        claims = Poisson(λ × exposure)     // vectorised Poisson draws
+        // 2. Score all policies in one ONNX call
+        λ = onnx_session.run(matrix)       // annual frequency per policy
+        // 3. Draw claims
+        claims = Poisson(λ × exposure)     // exposure = portfolio value at t=0, 1.0 thereafter
+        // 4. Update state for next year
         shift rolling 3-year window        // [w1, w2, w3] → [w2, w3, claims]
-        VehAge += 1, DrivAge += 1          // age for next year</div>
+        VehAge += 1, DrivAge += 1</div>
 
     <p>
       The ONNX model outputs λ in the original scale — <code>onnxmltools</code> preserves
