@@ -76,7 +76,7 @@ claim-simulation/
 │   ├── main.tf                         # EC2 instance, security group, Elastic IP
 │   ├── variables.tf                    # key pair name, allowed CIDR
 │   ├── outputs.tf                      # public IP, instance ID, SSH command
-│   └── TERRAFORM_GUIDE.md             # Terraform setup instructions
+│   └── TERRAFORM_GUIDE.md              # Terraform setup instructions
 ├── BENCHMARK.md                        # study design, observed runtimes, capacity planning
 ├── EC2_SETUP_GUIDE.md                  # manual EC2 setup (steps 1–5)
 └── SIMULATION_GUIDE.md                 # data pipeline, benchmark, shutdown

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "claim-simulation"
 version = "0.1.0"
-authors = [{ name = "David Fischer", email = "no@email.com" }]
+authors = [{ name = "David Fischer"}]
 description = "Non-life actuarial frequency model with LightGBM and ONNX export for fast claim simulation in Rust"
 readme = "README.md"
 requires-python = ">=3.9"
