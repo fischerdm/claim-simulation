@@ -122,11 +122,31 @@ different machine**, update two version strings in that file:
 - `python3.12` → your Python minor version (`python3 --version`)
 - `1.23.2` → your onnxruntime version (`pip show onnxruntime`)
 
+Build the release binary before running the benchmark (one-time, ~30–60 s):
+
+```bash
+cd rust && cargo build --release && cd ..
+```
+
 ---
 
 ## Python pipeline
 
-Run these scripts in order from the repo root.
+The Makefile runs all pipeline steps end-to-end with caching — only stale steps are
+re-run when their inputs change:
+
+```bash
+make
+```
+
+You can also target a specific step, for example to re-export ONNX models after
+retraining without re-running the full pipeline:
+
+```bash
+make models/frequency_model_v2.onnx
+```
+
+The sections below describe what each step does.
 
 ### 1. Download data
 
@@ -221,9 +241,6 @@ Uses a tiny grid to validate the full pipeline before committing to a long run.
 ### Full benchmark
 
 ```bash
-# Build Rust engine first (one-time, ~30–60 s after source changes)
-cd rust && cargo build --release && cd ..
-
 python python/benchmark.py
 ```
 
